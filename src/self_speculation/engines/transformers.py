@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import types
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
+from ..drafts import BoundaryDraftStore, DraftReceipt, DraftRequest
 from ..models import EngineCapabilities, InferenceRequest, StreamChunk
 
 
@@ -15,6 +18,14 @@ TransformersPromptRenderer = Callable[
     [InferenceRequest],
     str | Awaitable[str],
 ]
+TransformersDraftRequestPredicate = Callable[[InferenceRequest], bool]
+
+
+_MODEL_LOCKS: weakref.WeakKeyDictionary[Any, threading.RLock] = (
+    weakref.WeakKeyDictionary()
+)
+_MODEL_LOCKS_GUARD = threading.Lock()
+_FALLBACK_MODEL_LOCK = threading.RLock()
 
 
 async def _resolve(value: Any) -> Any:
@@ -33,6 +44,146 @@ def _transformers() -> tuple[Any, Any, Any]:
             "pip install 'self-speculation[transformers]'"
         ) from error
     return (StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer)
+
+
+def _torch() -> Any:
+    try:
+        import torch
+    except ImportError as error:  # pragma: no cover - optional dependency
+        raise ImportError(
+            "Transformers draft injection requires: "
+            "pip install 'self-speculation[transformers]'"
+        ) from error
+    return torch
+
+
+def _model_lock(model: Any) -> threading.RLock:
+    try:
+        with _MODEL_LOCKS_GUARD:
+            lock = _MODEL_LOCKS.get(model)
+            if lock is None:
+                lock = threading.RLock()
+                _MODEL_LOCKS[model] = lock
+            return lock
+    except TypeError:
+        return _FALLBACK_MODEL_LOCK
+
+
+class TransformersBoundaryCandidateGenerator:
+    """Offer request-scoped boundary drafts to Transformers assisted decoding."""
+
+    requires_model_outputs = False
+
+    def __init__(
+        self,
+        store: BoundaryDraftStore,
+        request_id: str,
+        *,
+        max_tokens: int,
+    ) -> None:
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        self.store = store
+        self.request_id = request_id
+        self.max_tokens = max_tokens
+        self.proposal_count = 0
+        self.proposed_tokens = 0
+        self.accepted_tokens = 0
+        self._last_candidate_length = 0
+
+    def get_candidates(self, input_ids: Any, **kwargs: Any) -> tuple[Any, None]:
+        del kwargs
+        if len(input_ids.shape) != 2 or int(input_ids.shape[0]) != 1:
+            raise ValueError(
+                "Transformers boundary drafts require batch size 1 token IDs"
+            )
+        sequence_length = int(input_ids.shape[1])
+        proposal = self.store.offer(
+            self.request_id,
+            input_ids[0].tolist(),
+            sequence_length=sequence_length,
+            max_tokens=self.max_tokens,
+        )
+        if proposal is None:
+            self._last_candidate_length = 0
+            return input_ids, None
+
+        torch = _torch()
+        candidate = torch.tensor(
+            [proposal.token_ids],
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        self._last_candidate_length = len(proposal.token_ids)
+        self.proposal_count += 1
+        self.proposed_tokens += self._last_candidate_length
+        return torch.cat((input_ids, candidate), dim=-1), None
+
+    def update_candidate_strategy(
+        self,
+        input_ids: Any,
+        scores: Any,
+        num_matches: Any,
+    ) -> None:
+        del input_ids, scores
+        accepted = min(int(num_matches), self._last_candidate_length)
+        self.accepted_tokens += max(0, accepted)
+        self._last_candidate_length = 0
+
+
+def _boundary_assisted_generate(
+    model: Any,
+    input_ids: Any,
+    logits_processor: Any,
+    stopping_criteria: Any,
+    generation_config: Any,
+    draft_candidate_generator: TransformersBoundaryCandidateGenerator,
+    self_speculation_streamer: Any = None,
+    synced_gpus: bool = False,
+    inputs_tensor: Any = None,
+    **model_kwargs: Any,
+) -> Any:
+    """Run Transformers' target verifier with an external candidate source."""
+
+    if not bool(getattr(generation_config, "use_cache", False)):
+        raise ValueError("Transformers draft injection requires use_cache=True")
+    if int(getattr(generation_config, "num_beams", 1)) != 1:
+        raise ValueError("Transformers draft injection does not support beam search")
+    if int(getattr(generation_config, "num_return_sequences", 1)) != 1:
+        raise ValueError(
+            "Transformers draft injection requires num_return_sequences=1"
+        )
+
+    lock = _model_lock(model)
+    with lock:
+        instance_attributes = getattr(model, "__dict__", {})
+        had_instance_getter = "_get_candidate_generator" in instance_attributes
+        previous_instance_getter = instance_attributes.get("_get_candidate_generator")
+
+        def get_candidate_generator(current_model: Any, **kwargs: Any) -> Any:
+            del current_model, kwargs
+            return draft_candidate_generator
+
+        model._get_candidate_generator = types.MethodType(
+            get_candidate_generator,
+            model,
+        )
+        try:
+            return model._assisted_decoding(
+                input_ids,
+                logits_processor=logits_processor,
+                stopping_criteria=stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                streamer=self_speculation_streamer,
+                inputs_tensor=inputs_tensor,
+                **model_kwargs,
+            )
+        finally:
+            if had_instance_getter:
+                model._get_candidate_generator = previous_instance_getter
+            else:
+                delattr(model, "_get_candidate_generator")
 
 
 def _flatten_token_ids(value: Any) -> tuple[int, ...]:
@@ -61,6 +212,8 @@ def _make_streamer(
                 clean_up_tokenization_spaces=clean_up_tokenization_spaces,
             )
             self._pending_token_ids: list[int] = []
+            self._end_lock = threading.Lock()
+            self._ended = False
 
         def put(self, value: Any) -> None:
             is_prompt = self.skip_prompt and self.next_tokens_are_prompt
@@ -84,6 +237,13 @@ def _make_streamer(
                 self._pending_token_ids.clear()
             if stream_end:
                 self.text_queue.put(self.stop_signal, timeout=self.timeout)
+
+        def end(self) -> None:
+            with self._end_lock:
+                if self._ended:
+                    return
+                self._ended = True
+                super().end()
 
     return ChunkStreamer()
 
@@ -127,12 +287,17 @@ class TransformersEngine:
         add_special_tokens: bool = True,
         skip_special_tokens: bool = True,
         clean_up_tokenization_spaces: bool = False,
+        draft_store: BoundaryDraftStore | None = None,
+        max_draft_tokens: int = 20,
+        draft_request_predicate: TransformersDraftRequestPredicate | None = None,
         name: str = "transformers",
     ) -> None:
         if model is None:
             raise ValueError("model is required")
         if tokenizer is None:
             raise ValueError("tokenizer is required")
+        if max_draft_tokens <= 0:
+            raise ValueError("max_draft_tokens must be positive")
         self.model = model
         self.tokenizer = tokenizer
         self.prompt_renderer = prompt_renderer
@@ -140,12 +305,18 @@ class TransformersEngine:
         self.add_special_tokens = add_special_tokens
         self.skip_special_tokens = skip_special_tokens
         self.clean_up_tokenization_spaces = clean_up_tokenization_spaces
+        self.draft_store = draft_store
+        self.max_draft_tokens = max_draft_tokens
+        self.draft_request_predicate = draft_request_predicate or (
+            lambda request: not request.request_id.endswith(":fork")
+        )
         self.name = name
         self.capabilities = EngineCapabilities(
             prompt=True,
             chat=True,
             token_ids=True,
             prefix_cache=False,
+            draft_feedback=draft_store is not None,
         )
 
     async def render_prompt(self, request: InferenceRequest) -> str:
@@ -194,8 +365,31 @@ class TransformersEngine:
             encoded = encoded[0]
         return tuple(int(token_id) for token_id in encoded)
 
+    def tokenize_continuation(self, text: str) -> tuple[int, ...]:
+        encode = getattr(self.tokenizer, "encode", None)
+        if encode is None:
+            encoded = self.tokenizer(text, add_special_tokens=False)["input_ids"]
+        else:
+            encoded = encode(text, add_special_tokens=False)
+        if hasattr(encoded, "tolist"):
+            encoded = encoded.tolist()
+        if encoded and isinstance(encoded[0], list):
+            if len(encoded) != 1:
+                raise ValueError("TransformersEngine only supports batch size 1")
+            encoded = encoded[0]
+        return tuple(int(token_id) for token_id in encoded)
+
     async def prompt_token_count(self, request: InferenceRequest) -> int:
         return len(self.tokenize_text(await self.render_prompt(request)))
+
+    async def submit(self, draft: DraftRequest) -> DraftReceipt:
+        if self.draft_store is None:
+            raise RuntimeError("TransformersEngine has no configured draft_store")
+        return self.draft_store.register(draft)
+
+    async def clear(self, request_id: str) -> None:
+        if self.draft_store is not None:
+            self.draft_store.clear(request_id)
 
     def _request_generation_kwargs(
         self,
@@ -243,6 +437,24 @@ class TransformersEngine:
                 return stop_event.is_set()
 
         options = self._request_generation_kwargs(request)
+        if self.draft_store is not None and self.draft_request_predicate(request):
+            if "custom_generate" in options:
+                raise ValueError(
+                    "generate_kwargs['custom_generate'] conflicts with draft injection"
+                )
+            if options.get("use_cache") is False:
+                raise ValueError(
+                    "Transformers draft injection requires use_cache=True"
+                )
+            options.setdefault("use_cache", True)
+            options["custom_generate"] = _boundary_assisted_generate
+            options["draft_candidate_generator"] = (
+                TransformersBoundaryCandidateGenerator(
+                    self.draft_store,
+                    request.request_id,
+                    max_tokens=self.max_draft_tokens,
+                )
+            )
         supplied_criteria = options.pop("stopping_criteria", None)
         criteria = list(supplied_criteria or ())
         criteria.append(StopOnCancellation())
@@ -253,6 +465,11 @@ class TransformersEngine:
             clean_up_tokenization_spaces=self.clean_up_tokenization_spaces,
         )
         options["streamer"] = streamer
+        if "draft_candidate_generator" in options:
+            # Transformers filters standard generation-mode arguments when a
+            # custom callable is used, so pass the same streamer under a
+            # callable-specific name as well.
+            options["self_speculation_streamer"] = streamer
 
         def generate() -> Any:
             try:
@@ -263,15 +480,35 @@ class TransformersEngine:
 
         generation_task = asyncio.create_task(asyncio.to_thread(generate))
         iterator = iter(streamer)
+        iteration_end = object()
+        next_task: asyncio.Task[Any] | None = asyncio.create_task(
+            asyncio.to_thread(next, iterator, iteration_end)
+        )
         completed = False
         try:
             while True:
-                chunk = await asyncio.to_thread(next, iterator, None)
-                if chunk is None:
+                assert next_task is not None
+                done, _ = await asyncio.wait(
+                    (next_task, generation_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if generation_task in done:
+                    # All standard generation paths should end the streamer.
+                    # Ending is idempotent here and also unblocks custom paths
+                    # that return or fail before doing so themselves.
+                    streamer.end()
+                if next_task not in done:
+                    continue
+                chunk = next_task.result()
+                if chunk is iteration_end:
+                    next_task = None
                     break
                 if not isinstance(chunk, StreamChunk):
                     raise TypeError("Transformers streamer produced an invalid chunk")
                 yield chunk
+                next_task = asyncio.create_task(
+                    asyncio.to_thread(next, iterator, iteration_end)
+                )
             output = await generation_task
             completed = True
             sequences = getattr(output, "sequences", output)
@@ -294,6 +531,12 @@ class TransformersEngine:
             )
         finally:
             stop_event.set()
+            streamer.end()
+            if next_task is not None:
+                try:
+                    await next_task
+                except BaseException:
+                    pass
             if not completed:
                 try:
                     await generation_task

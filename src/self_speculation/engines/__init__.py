@@ -10,7 +10,12 @@ from .openai_compatible import (
     TGIEngine,
     VLLMEngine,
 )
-from .transformers import TransformersEngine, TransformersPromptRenderer
+from .transformers import (
+    TransformersBoundaryCandidateGenerator,
+    TransformersDraftRequestPredicate,
+    TransformersEngine,
+    TransformersPromptRenderer,
+)
 from .vllm_native import (
     NativePromptRenderer,
     OutputMode,
@@ -32,6 +37,8 @@ __all__ = [
     "SGLangEngine",
     "StreamFactory",
     "TGIEngine",
+    "TransformersBoundaryCandidateGenerator",
+    "TransformersDraftRequestPredicate",
     "TransformersEngine",
     "TransformersPromptRenderer",
     "VLLMEngine",

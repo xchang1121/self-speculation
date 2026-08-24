@@ -4,7 +4,13 @@ import asyncio
 import importlib.util
 import unittest
 
-from self_speculation import InferenceRequest, TransformersEngine
+from self_speculation import (
+    BoundaryDraftStore,
+    DraftBoundary,
+    DraftRequest,
+    InferenceRequest,
+    TransformersEngine,
+)
 
 
 HAS_TRANSFORMERS = all(
@@ -104,6 +110,97 @@ class TransformersEngineTest(unittest.IsolatedAsyncioTestCase):
 
         custom = TransformersEngine(self.model, tokenizer, prompt_renderer=render)
         self.assertEqual(await custom.render_prompt(request), "custom")
+
+    async def test_verifies_boundary_draft_with_fewer_target_forwards(self) -> None:
+        import torch
+
+        class NumericTokenizer:
+            def encode(self, text, *, add_special_tokens=True):
+                del text
+                return [1, 4, 5] if add_special_tokens else [4, 5]
+
+            def __call__(self, text, *, return_tensors=None, add_special_tokens=True):
+                del text, return_tensors
+                ids = self.encode("", add_special_tokens=add_special_tokens)
+                tensor = torch.tensor([ids], dtype=torch.long)
+                return {
+                    "input_ids": tensor,
+                    "attention_mask": torch.ones_like(tensor),
+                }
+
+            def decode(self, token_ids, **kwargs):
+                del kwargs
+                return "".join(f"t{int(token_id)} " for token_id in token_ids)
+
+        tokenizer = NumericTokenizer()
+        inputs = tokenizer("prompt", return_tensors="pt")
+
+        baseline_calls = 0
+
+        def baseline_hook(*args):
+            nonlocal baseline_calls
+            del args
+            baseline_calls += 1
+
+        handle = self.model.register_forward_hook(baseline_hook)
+        try:
+            baseline = self.model.generate(
+                **inputs,
+                max_new_tokens=4,
+                do_sample=False,
+                use_cache=True,
+            )
+        finally:
+            handle.remove()
+
+        generated = tuple(int(token) for token in baseline[0, 3:].tolist())
+        self.assertEqual(len(generated), 4)
+        store = BoundaryDraftStore(max_draft_tokens=2)
+        store.register(
+            DraftRequest(
+                request_id="transformers-d3",
+                token_ids=generated[1:3],
+                boundary=DraftBoundary(token_ids=(generated[0],)),
+                prompt_token_count=3,
+            )
+        )
+        engine = TransformersEngine(
+            self.model,
+            tokenizer,
+            draft_store=store,
+            max_draft_tokens=2,
+        )
+
+        assisted_calls = 0
+
+        def assisted_hook(*args):
+            nonlocal assisted_calls
+            del args
+            assisted_calls += 1
+
+        handle = self.model.register_forward_hook(assisted_hook)
+        try:
+            chunks = [
+                chunk
+                async for chunk in engine.stream(
+                    InferenceRequest(
+                        prompt="prompt",
+                        request_id="transformers-d3",
+                        max_tokens=4,
+                    )
+                )
+            ]
+        finally:
+            handle.remove()
+
+        streamed_ids = tuple(
+            token_id for chunk in chunks for token_id in chunk.token_ids
+        )
+        self.assertEqual(streamed_ids, generated)
+        self.assertEqual(store.snapshot().injections, 1)
+        self.assertLess(assisted_calls, baseline_calls)
+        await engine.clear("transformers-d3")
+        self.assertEqual(store.snapshot().active_requests, 0)
 
 
 if __name__ == "__main__":
