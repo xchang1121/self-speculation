@@ -10,6 +10,12 @@ from .openai_compatible import (
     TGIEngine,
     VLLMEngine,
 )
+from .vllm_native import (
+    NativePromptRenderer,
+    OutputMode,
+    SamplingParamsFactory,
+    VLLMNativeEngine,
+)
 
 __all__ = [
     "CallableEngine",
@@ -17,12 +23,16 @@ __all__ = [
     "EngineCapabilityError",
     "InferenceEngine",
     "LlamaCppEngine",
+    "NativePromptRenderer",
     "OpenAICompatibleEngine",
     "OpenAIStreamError",
+    "OutputMode",
+    "SamplingParamsFactory",
     "SGLangEngine",
     "StreamFactory",
     "TGIEngine",
     "VLLMEngine",
+    "VLLMNativeEngine",
     "default_chunk_mapper",
     "validate_request",
 ]
