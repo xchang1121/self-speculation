@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from .deepseek_dsml import DeepSeekDsmlToolCallParser
 from .json_parser import (
     bare_json_parser,
     llama_json_parser,
@@ -17,6 +18,7 @@ from .qwen_xml import QwenXmlToolCallParser
 
 def default_parser_registry() -> ParserRegistry:
     registry = ParserRegistry()
+    registry.register("deepseek_dsml", DeepSeekDsmlToolCallParser)
     registry.register("qwen_xml", QwenXmlToolCallParser)
     registry.register("tagged_json", tagged_json_parser)
     registry.register("mistral_json", mistral_json_parser)

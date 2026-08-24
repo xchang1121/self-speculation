@@ -3,6 +3,7 @@
 from .controller import ForkController, ForkRunResult, ForkTrigger, first_output_trigger
 from .decoding import (
     DecoderFactory,
+    DeepSeekDsmlToolCallParser,
     JsonToolCallParser,
     ParserFactory,
     ParserRegistrationError,
@@ -48,6 +49,7 @@ __all__ = [
     "EngineCapabilities",
     "EngineCapabilityError",
     "DecoderFactory",
+    "DeepSeekDsmlToolCallParser",
     "CallableForkBuilder",
     "ForkBuildError",
     "ForkChunkEvent",

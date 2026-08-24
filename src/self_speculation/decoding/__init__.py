@@ -2,6 +2,7 @@
 
 from .base import DecoderFactory, ToolCallDecoder
 from .defaults import default_decoder, default_parser_registry
+from .deepseek_dsml import DeepSeekDsmlToolCallParser
 from .json_parser import JsonToolCallParser
 from .qwen_xml import QwenXmlToolCallParser
 from .registry import (
@@ -14,6 +15,7 @@ from .registry import (
 
 __all__ = [
     "DecoderFactory",
+    "DeepSeekDsmlToolCallParser",
     "JsonToolCallParser",
     "ParserFactory",
     "ParserRegistrationError",
