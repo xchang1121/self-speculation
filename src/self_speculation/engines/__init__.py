@@ -10,6 +10,7 @@ from .openai_compatible import (
     TGIEngine,
     VLLMEngine,
 )
+from .transformers import TransformersEngine, TransformersPromptRenderer
 from .vllm_native import (
     NativePromptRenderer,
     OutputMode,
@@ -31,6 +32,8 @@ __all__ = [
     "SGLangEngine",
     "StreamFactory",
     "TGIEngine",
+    "TransformersEngine",
+    "TransformersPromptRenderer",
     "VLLMEngine",
     "VLLMNativeEngine",
     "default_chunk_mapper",
