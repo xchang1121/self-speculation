@@ -42,6 +42,7 @@ from .forks import (
     ForkRequestBuilder,
     PrefixForkBuilder,
 )
+from .integrations import VLLMBoundaryProposer, install_vllm_request_id_hook
 from .models import (
     EngineCapabilities,
     InferenceRequest,
@@ -155,6 +156,7 @@ __all__ = [
     "ToolCallEvent",
     "TGIEngine",
     "VLLMEngine",
+    "VLLMBoundaryProposer",
     "VLLMNativeEngine",
     "__version__",
     "default_decoder",
@@ -163,5 +165,6 @@ __all__ = [
     "default_parser_registry",
     "first_output_trigger",
     "format_tool_call_draft",
+    "install_vllm_request_id_hook",
     "validate_request",
 ]
