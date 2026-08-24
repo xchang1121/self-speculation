@@ -15,6 +15,7 @@ from .callable import (
     normalize_draft_receipt,
 )
 from .formatters import default_draft_boundary, format_tool_call_draft
+from .http import DraftFeedbackHTTPError, HTTPDraftFeedback, SporkHTTPDraftFeedback
 
 __all__ = [
     "CallableDraftFeedback",
@@ -22,9 +23,12 @@ __all__ = [
     "DraftBuilder",
     "DraftClearer",
     "DraftFeedback",
+    "DraftFeedbackHTTPError",
     "DraftReceipt",
     "DraftRequest",
     "DraftSubmitter",
+    "HTTPDraftFeedback",
+    "SporkHTTPDraftFeedback",
     "ToolCallDraftBuilder",
     "default_draft_boundary",
     "format_tool_call_draft",
