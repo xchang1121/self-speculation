@@ -6,6 +6,7 @@ from .deepseek_dsml import DeepSeekDsmlToolCallParser
 from .deepseek_v3 import DeepSeekV3ToolCallParser
 from .json_parser import JsonToolCallParser
 from .qwen_xml import QwenXmlToolCallParser
+from .pythonic import PythonicToolCallParser
 from .registry import (
     ParserFactory,
     ParserRegistrationError,
@@ -23,6 +24,7 @@ __all__ = [
     "ParserRegistrationError",
     "ParserRegistry",
     "QwenXmlToolCallParser",
+    "PythonicToolCallParser",
     "StreamingToolCallDecoder",
     "TextToolCallParser",
     "ToolCallDecoder",

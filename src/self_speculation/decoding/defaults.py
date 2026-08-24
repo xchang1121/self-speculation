@@ -13,6 +13,7 @@ from .json_parser import (
     tagged_json_parser,
     xlam_json_parser,
 )
+from .pythonic import PythonicToolCallParser
 from .registry import ParserRegistry, StreamingToolCallDecoder
 from .qwen_xml import QwenXmlToolCallParser
 
@@ -25,6 +26,7 @@ def default_parser_registry() -> ParserRegistry:
     registry.register("tagged_json", tagged_json_parser)
     registry.register("mistral_json", mistral_json_parser)
     registry.register("llama_json", llama_json_parser)
+    registry.register("pythonic", PythonicToolCallParser)
     registry.register("xlam_json", xlam_json_parser)
     registry.register("bare_json", bare_json_parser)
     return registry
