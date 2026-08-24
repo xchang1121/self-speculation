@@ -51,6 +51,9 @@ from .forks import (
     PrefixForkBuilder,
 )
 from .integrations import (
+    SGLANG_CONTROL_PREFIX,
+    SGLangHTTPDraftFeedback,
+    SGLangIntegrationError,
     SelfSpeculationEndpointPlugin,
     VLLMBoundaryProposer,
     VLLMCollectiveRPCDraftFeedback,
@@ -59,6 +62,7 @@ from .integrations import (
     install_vllm_request_id_hook,
     install_vllm_http_routes,
     install_vllm_worker_rpc,
+    install_sglang_plugin,
 )
 from .models import (
     EngineCapabilities,
@@ -165,6 +169,9 @@ __all__ = [
     "StreamChunk",
     "StreamFactory",
     "SGLangEngine",
+    "SGLANG_CONTROL_PREFIX",
+    "SGLangHTTPDraftFeedback",
+    "SGLangIntegrationError",
     "SelfSpeculationEndpointPlugin",
     "StreamSnapshot",
     "SporkHTTPDraftFeedback",
@@ -197,5 +204,6 @@ __all__ = [
     "install_vllm_request_id_hook",
     "install_vllm_http_routes",
     "install_vllm_worker_rpc",
+    "install_sglang_plugin",
     "validate_request",
 ]

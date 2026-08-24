@@ -298,6 +298,7 @@ class VLLMEngine(OpenAICompatibleEngine):
 class SGLangEngine(OpenAICompatibleEngine):
     def __init__(self, base_url: str, **kwargs: Any) -> None:
         kwargs.setdefault("name", "sglang")
+        kwargs.setdefault("request_id_field", "rid")
         super().__init__(base_url, **kwargs)
 
 

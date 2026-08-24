@@ -191,7 +191,7 @@ class OpenAICompatibleEngineTest(unittest.IsolatedAsyncioTestCase):
             InferenceRequest(prompt="x", request_id="stable-id")
         )
         self.assertEqual(vllm_body["request_id"], "stable-id")
-        self.assertNotIn("request_id", sglang_body)
+        self.assertEqual(sglang_body["rid"], "stable-id")
         await client.aclose()
 
 
