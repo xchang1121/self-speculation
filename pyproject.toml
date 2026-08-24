@@ -19,7 +19,8 @@ classifiers = [
 
 [project.optional-dependencies]
 http = ["httpx>=0.27"]
-test = ["httpx>=0.27"]
+server = ["fastapi>=0.115"]
+test = ["fastapi>=0.115", "httpx>=0.27"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -6,10 +6,10 @@ the base package remains usable with other engines and on non-CUDA hosts.
 
 from __future__ import annotations
 
-import os
 import asyncio
 import inspect
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict
 from functools import wraps
 from typing import Any
@@ -19,6 +19,7 @@ from ..drafts import (
     DraftBoundary,
     DraftReceipt,
     DraftRequest,
+    HTTPDraftFeedback,
 )
 
 
@@ -27,6 +28,7 @@ _RPC_MARKER = "_self_speculation_worker_rpc"
 REGISTER_DRAFT_RPC = "self_speculation_register_draft"
 CLEAR_DRAFT_RPC = "self_speculation_clear_draft"
 DRAFT_STATUS_RPC = "self_speculation_draft_status"
+EngineClientResolver = Callable[[Any], Any | Awaitable[Any]]
 
 
 class VLLMIntegrationError(RuntimeError):
@@ -184,6 +186,142 @@ class VLLMCollectiveRPCDraftFeedback:
 
     async def status(self) -> tuple[Mapping[str, Any], ...]:
         return await self._rpc(DRAFT_STATUS_RPC, ())
+
+
+class VLLMHTTPDraftFeedback(HTTPDraftFeedback):
+    """Client for routes installed by ``install_vllm_http_routes``."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        prefix: str = "/self-speculation",
+        **kwargs: Any,
+    ) -> None:
+        if not prefix.startswith("/") or prefix.endswith("/"):
+            raise ValueError("route prefix must start with '/' and not end with '/'")
+        kwargs.setdefault("submit_path", prefix + "/drafts")
+        kwargs.setdefault("clear_path", prefix + "/clear")
+        kwargs.setdefault("clear_method", "POST")
+        kwargs.setdefault("name", "vllm-http-draft-feedback")
+        super().__init__(base_url, **kwargs)
+        self.status_path = prefix + "/status"
+
+    def clear_payload(self, request_id: str) -> Mapping[str, Any]:
+        return {"request_id": request_id}
+
+    async def status(self) -> Mapping[str, Any]:
+        response = await self._client.get(
+            self.base_url + self.status_path,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = self._response_payload(response)
+        if not isinstance(payload, Mapping):
+            raise VLLMIntegrationError("vLLM status response must be a mapping")
+        return payload
+
+
+def install_vllm_http_routes(
+    app: Any,
+    *,
+    engine_client_resolver: EngineClientResolver | None = None,
+    prefix: str = "/self-speculation",
+    timeout: float | None = 30.0,
+) -> bool:
+    """Add request-scoped D3 routes to a vLLM FastAPI application."""
+
+    if not prefix.startswith("/") or prefix.endswith("/"):
+        raise ValueError("route prefix must start with '/' and not end with '/'")
+    add_api_route = getattr(app, "add_api_route", None)
+    if add_api_route is None or not callable(add_api_route):
+        raise TypeError("app must provide add_api_route")
+    state = getattr(app, "state", None)
+    if state is None:
+        raise TypeError("app must provide state")
+    marker = "_self_speculation_http_routes"
+    if getattr(state, marker, False):
+        return False
+    try:
+        from fastapi import HTTPException
+    except ImportError as error:  # pragma: no cover - optional server dependency
+        raise ImportError(
+            "vLLM HTTP routes require: pip install 'self-speculation[server]'"
+        ) from error
+
+    async def feedback() -> VLLMCollectiveRPCDraftFeedback:
+        if engine_client_resolver is None:
+            engine_client = getattr(app.state, "engine_client", None)
+        else:
+            engine_client = engine_client_resolver(app)
+            if inspect.isawaitable(engine_client):
+                engine_client = await engine_client
+        if engine_client is None:
+            raise HTTPException(status_code=503, detail="vLLM engine client unavailable")
+        return VLLMCollectiveRPCDraftFeedback(engine_client, timeout=timeout)
+
+    def request_from_payload(payload: Mapping[str, Any]) -> DraftRequest:
+        boundary_payload = payload.get("boundary")
+        if not isinstance(boundary_payload, Mapping):
+            raise ValueError("boundary must be an object")
+        boundary = DraftBoundary(
+            text=boundary_payload.get("text"),
+            token_ids=tuple(
+                int(token) for token in boundary_payload.get("token_ids") or ()
+            ),
+        )
+        return DraftRequest(
+            request_id=str(payload.get("request_id") or ""),
+            text=str(payload.get("text") or ""),
+            token_ids=tuple(int(token) for token in payload.get("token_ids") or ()),
+            boundary=boundary,
+            prompt_token_count=(
+                int(payload["prompt_token_count"])
+                if payload.get("prompt_token_count") is not None
+                else None
+            ),
+            metadata=dict(payload.get("metadata") or {}),
+        )
+
+    async def submit(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            draft = request_from_payload(payload)
+            receipt = await (await feedback()).submit(draft)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except VLLMIntegrationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {
+            "request_id": receipt.request_id,
+            "registered": receipt.registered,
+            "draft_token_count": receipt.draft_token_count,
+            "accepted_token_count": receipt.accepted_token_count,
+            "details": dict(receipt.details),
+        }
+
+    async def clear(payload: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            raise HTTPException(status_code=422, detail="request_id must not be empty")
+        try:
+            await (await feedback()).clear(request_id)
+        except VLLMIntegrationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"status": "cleared", "request_id": request_id}
+
+    async def status() -> dict[str, Any]:
+        try:
+            results = await (await feedback()).status()
+        except VLLMIntegrationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"status": "ok", "worker_results": results}
+
+    add_api_route(prefix + "/drafts", submit, methods=["POST"])
+    add_api_route(prefix + "/clear", clear, methods=["POST"])
+    add_api_route(prefix + "/status", status, methods=["GET"])
+    setattr(state, marker, True)
+    return True
 
 
 def install_vllm_request_id_hook(runner_class: type[Any] | None = None) -> bool:

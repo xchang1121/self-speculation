@@ -45,8 +45,10 @@ from .forks import (
 from .integrations import (
     VLLMBoundaryProposer,
     VLLMCollectiveRPCDraftFeedback,
+    VLLMHTTPDraftFeedback,
     VLLMIntegrationError,
     install_vllm_request_id_hook,
+    install_vllm_http_routes,
     install_vllm_worker_rpc,
 )
 from .models import (
@@ -164,6 +166,7 @@ __all__ = [
     "VLLMEngine",
     "VLLMBoundaryProposer",
     "VLLMCollectiveRPCDraftFeedback",
+    "VLLMHTTPDraftFeedback",
     "VLLMNativeEngine",
     "VLLMIntegrationError",
     "__version__",
@@ -174,6 +177,7 @@ __all__ = [
     "first_output_trigger",
     "format_tool_call_draft",
     "install_vllm_request_id_hook",
+    "install_vllm_http_routes",
     "install_vllm_worker_rpc",
     "validate_request",
 ]

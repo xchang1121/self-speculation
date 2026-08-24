@@ -4,12 +4,17 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+from fastapi import FastAPI
+
 from self_speculation import (
     DraftBoundary,
     DraftRequest,
     VLLMBoundaryProposer,
     VLLMCollectiveRPCDraftFeedback,
     VLLMIntegrationError,
+    VLLMHTTPDraftFeedback,
+    install_vllm_http_routes,
     install_vllm_request_id_hook,
     install_vllm_worker_rpc,
 )
@@ -133,6 +138,8 @@ class FakeAsyncEngineClient:
                 {"status": "ok", "registered": True, "draft_token_count": 2},
                 {"status": "skipped", "reason": "no_boundary_proposer"},
             ]
+        if method.endswith("draft_status"):
+            return [{"status": "ok", "active_requests": 1}]
         return [{"status": "cleared"}, {"status": "skipped"}]
 
 
@@ -174,6 +181,54 @@ class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
                     boundary=DraftBoundary(token_ids=(2,)),
                 )
             )
+
+
+class VLLMHTTPRoutesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_round_trips_feedback_through_fastapi_routes(self) -> None:
+        app = FastAPI()
+        engine_client = FakeAsyncEngineClient()
+        app.state.engine_client = engine_client
+        self.assertTrue(install_vllm_http_routes(app))
+        self.assertFalse(install_vllm_http_routes(app))
+
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://vllm",
+        )
+        feedback = VLLMHTTPDraftFeedback("http://vllm", client=client)
+        receipt = await feedback.submit(
+            DraftRequest(
+                request_id="main/one",
+                token_ids=(20, 21),
+                boundary=DraftBoundary(text="<tool_call>", token_ids=(10,)),
+                prompt_token_count=3,
+            )
+        )
+        status = await feedback.status()
+        await feedback.clear("main/one")
+
+        self.assertTrue(receipt.registered)
+        self.assertEqual(status["worker_results"][0]["active_requests"], 1)
+        self.assertEqual(
+            engine_client.calls[-1][2],
+            ("main/one",),
+        )
+        await client.aclose()
+
+    async def test_rejects_invalid_route_payloads(self) -> None:
+        app = FastAPI()
+        app.state.engine_client = FakeAsyncEngineClient()
+        install_vllm_http_routes(app)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://vllm",
+        )
+        response = await client.post(
+            "/self-speculation/drafts",
+            json={"request_id": "x", "token_ids": [1]},
+        )
+        self.assertEqual(response.status_code, 422)
+        await client.aclose()
 
 
 if __name__ == "__main__":
