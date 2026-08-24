@@ -17,7 +17,15 @@ from .decoding import (
     default_decoder,
     default_parser_registry,
 )
-from .engines import EngineCapabilityError, InferenceEngine, validate_request
+from .engines import (
+    CallableEngine,
+    ChunkMapper,
+    EngineCapabilityError,
+    InferenceEngine,
+    StreamFactory,
+    default_chunk_mapper,
+    validate_request,
+)
 from .forks import (
     CallableForkBuilder,
     ForkBuildError,
@@ -50,6 +58,8 @@ __version__ = "0.1.0"
 __all__ = [
     "EngineCapabilities",
     "EngineCapabilityError",
+    "CallableEngine",
+    "ChunkMapper",
     "DecoderFactory",
     "DeepSeekDsmlToolCallParser",
     "DeepSeekV3ToolCallParser",
@@ -77,6 +87,7 @@ __all__ = [
     "QwenXmlToolCallParser",
     "PythonicToolCallParser",
     "StreamChunk",
+    "StreamFactory",
     "StreamSnapshot",
     "StreamingToolCallDecoder",
     "TextToolCallParser",
@@ -87,6 +98,7 @@ __all__ = [
     "ToolCallEvent",
     "__version__",
     "default_decoder",
+    "default_chunk_mapper",
     "default_parser_registry",
     "first_output_trigger",
     "validate_request",
