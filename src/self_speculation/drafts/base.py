@@ -134,6 +134,20 @@ class ToolCallDraftBuilder:
             if self.boundary_resolver is not None
             else None
         )
+        if (
+            boundary is not None
+            and boundary.text
+            and not boundary.token_ids
+            and self.tokenizer is not None
+        ):
+            encoded_boundary = tuple(
+                int(item) for item in await _resolve(self.tokenizer(boundary.text))
+            )
+            if encoded_boundary:
+                boundary = DraftBoundary(
+                    text=boundary.text,
+                    token_ids=encoded_boundary,
+                )
         return DraftRequest(
             request_id=main_request.request_id,
             text=text,

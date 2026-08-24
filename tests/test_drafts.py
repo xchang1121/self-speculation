@@ -75,7 +75,11 @@ class ToolCallDraftBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft.request_id, "main")
         self.assertEqual(draft.token_ids, (0, 1, 2, 3, 4))
         self.assertEqual(draft.prompt_token_count, 12)
-        self.assertEqual(draft.boundary, DraftBoundary(text="<tool_call>"))
+        self.assertEqual(draft.boundary.text, "<tool_call>")
+        self.assertEqual(
+            draft.boundary.token_ids,
+            tuple(range(len("<tool_call>"))),
+        )
         self.assertEqual(draft.metadata["fork_request_id"], "main:fork")
 
     async def test_uses_request_prompt_count_and_validates_empty_calls(self) -> None:
