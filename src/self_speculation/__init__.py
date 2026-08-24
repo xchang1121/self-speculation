@@ -66,6 +66,7 @@ from .events import (
     ToolCallEvent,
 )
 from .drafts import (
+    CallableDraftFeedback,
     DraftBoundary,
     DraftBuilder,
     DraftFeedback,
@@ -82,6 +83,7 @@ __all__ = [
     "EngineCapabilities",
     "EngineCapabilityError",
     "CallableEngine",
+    "CallableDraftFeedback",
     "ChunkMapper",
     "DecoderFactory",
     "DeepSeekDsmlToolCallParser",
