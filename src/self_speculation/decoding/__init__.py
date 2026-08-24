@@ -3,6 +3,7 @@
 from .base import DecoderFactory, ToolCallDecoder
 from .defaults import default_decoder, default_parser_registry
 from .json_parser import JsonToolCallParser
+from .qwen_xml import QwenXmlToolCallParser
 from .registry import (
     ParserFactory,
     ParserRegistrationError,
@@ -17,6 +18,7 @@ __all__ = [
     "ParserFactory",
     "ParserRegistrationError",
     "ParserRegistry",
+    "QwenXmlToolCallParser",
     "StreamingToolCallDecoder",
     "TextToolCallParser",
     "ToolCallDecoder",
