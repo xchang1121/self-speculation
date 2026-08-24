@@ -66,13 +66,18 @@ from .events import (
     ToolCallEvent,
 )
 from .drafts import (
+    BoundaryDraftFeedback,
+    BoundaryDraftStore,
+    BoundaryTokenizer,
     CallableDraftFeedback,
     DraftBoundary,
     DraftBuilder,
     DraftFeedback,
     DraftFeedbackHTTPError,
+    DraftProposal,
     DraftReceipt,
     DraftRequest,
+    DraftStoreSnapshot,
     HTTPDraftFeedback,
     SporkHTTPDraftFeedback,
     ToolCallDraftBuilder,
@@ -83,6 +88,9 @@ from .drafts import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "BoundaryDraftFeedback",
+    "BoundaryDraftStore",
+    "BoundaryTokenizer",
     "EngineCapabilities",
     "EngineCapabilityError",
     "CallableEngine",
@@ -97,8 +105,10 @@ __all__ = [
     "DraftFailedEvent",
     "DraftFeedback",
     "DraftFeedbackHTTPError",
+    "DraftProposal",
     "DraftReceipt",
     "DraftRequest",
+    "DraftStoreSnapshot",
     "DraftSubmittedEvent",
     "HTTPDraftFeedback",
     "CallableForkBuilder",
