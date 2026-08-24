@@ -62,6 +62,16 @@ from .events import (
     MainCompletedEvent,
     ToolCallEvent,
 )
+from .drafts import (
+    DraftBoundary,
+    DraftBuilder,
+    DraftFeedback,
+    DraftReceipt,
+    DraftRequest,
+    ToolCallDraftBuilder,
+    default_draft_boundary,
+    format_tool_call_draft,
+)
 
 __version__ = "0.1.0"
 
@@ -73,6 +83,11 @@ __all__ = [
     "DecoderFactory",
     "DeepSeekDsmlToolCallParser",
     "DeepSeekV3ToolCallParser",
+    "DraftBoundary",
+    "DraftBuilder",
+    "DraftFeedback",
+    "DraftReceipt",
+    "DraftRequest",
     "CallableForkBuilder",
     "ForkBuildError",
     "ForkChunkEvent",
@@ -111,6 +126,7 @@ __all__ = [
     "TokenLogprob",
     "ToolCall",
     "ToolCallDecoder",
+    "ToolCallDraftBuilder",
     "ToolCallDelta",
     "ToolCallEvent",
     "TGIEngine",
@@ -118,8 +134,10 @@ __all__ = [
     "VLLMNativeEngine",
     "__version__",
     "default_decoder",
+    "default_draft_boundary",
     "default_chunk_mapper",
     "default_parser_registry",
     "first_output_trigger",
+    "format_tool_call_draft",
     "validate_request",
 ]
