@@ -103,7 +103,9 @@ class VLLMWorkerRPCBridgeTest(unittest.TestCase):
         worker.model_runner = SimpleNamespace(
             drafter=proposer,
             requests={
-                "main": SimpleNamespace(prompt_token_ids=[9, 8, 7])
+                "cmpl-main-0-random": SimpleNamespace(
+                    prompt_token_ids=[9, 8, 7]
+                )
             },
         )
 
@@ -113,12 +115,14 @@ class VLLMWorkerRPCBridgeTest(unittest.TestCase):
             "main", [1, 2], [9], None
         )
         status = worker.self_speculation_draft_status()
-        proposer.set_request_ids(("main",))
+        proposer.set_request_ids(("cmpl-main-0-random",))
         before_new_boundary = proposer.propose([[1]], [3], [[9, 8, 7]])
         at_new_boundary = proposer.propose([[1]], [4], [[9, 8, 7, 9]])
+        worker.model_runner.requests.clear()
         cleared = worker.self_speculation_clear_draft("main")
 
         self.assertTrue(registered["registered"])
+        self.assertEqual(registered["internal_request_id"], "cmpl-main-0-random")
         self.assertEqual(status["active_requests"], 1)
         self.assertEqual(before_new_boundary, [[]])
         self.assertEqual(at_new_boundary, [[1, 2]])
@@ -133,6 +137,26 @@ class VLLMWorkerRPCBridgeTest(unittest.TestCase):
         worker.model_runner = SimpleNamespace()
         result = worker.self_speculation_register_draft("x", [1], [2])
         self.assertEqual(result["status"], "skipped")
+
+    def test_rejects_ambiguous_external_request_ids(self) -> None:
+        class Worker:
+            pass
+
+        proposer = VLLMBoundaryProposerTest().proposer()
+        worker = Worker()
+        worker.model_runner = SimpleNamespace(
+            drafter=proposer,
+            requests={
+                "chatcmpl-shared-a": SimpleNamespace(prompt_token_ids=[1]),
+                "chatcmpl-shared-b": SimpleNamespace(prompt_token_ids=[1]),
+            },
+        )
+        install_vllm_worker_rpc(Worker)
+        result = worker.self_speculation_register_draft(
+            "shared", [1], [2], None
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertIn("ambiguous", result["error"])
 
 
 class FakeAsyncEngineClient:

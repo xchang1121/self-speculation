@@ -184,6 +184,14 @@ class OpenAICompatibleEngineTest(unittest.IsolatedAsyncioTestCase):
             [engine.name for engine in engines],
             ["vllm", "sglang", "tgi", "llama.cpp"],
         )
+        _, vllm_body = engines[0]._payload(
+            InferenceRequest(prompt="x", request_id="stable-id")
+        )
+        _, sglang_body = engines[1]._payload(
+            InferenceRequest(prompt="x", request_id="stable-id")
+        )
+        self.assertEqual(vllm_body["request_id"], "stable-id")
+        self.assertNotIn("request_id", sglang_body)
         await client.aclose()
 
 

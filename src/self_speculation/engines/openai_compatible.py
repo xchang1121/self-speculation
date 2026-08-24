@@ -140,6 +140,7 @@ class OpenAICompatibleEngine:
         name: str = "openai-compatible",
         choice_index: int = 0,
         prefix_cache: bool | None = None,
+        request_id_field: str | None = None,
     ) -> None:
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
@@ -152,6 +153,7 @@ class OpenAICompatibleEngine:
         self.timeout = timeout
         self.name = name
         self.choice_index = choice_index
+        self.request_id_field = request_id_field
         self.capabilities = EngineCapabilities(
             prompt=True,
             chat=True,
@@ -180,6 +182,8 @@ class OpenAICompatibleEngine:
     def _payload(self, request: InferenceRequest) -> tuple[str, dict[str, Any]]:
         body = dict(request.extra)
         body["stream"] = True
+        if self.request_id_field is not None:
+            body.setdefault(self.request_id_field, request.request_id)
         if request.model is not None:
             body["model"] = request.model
         if request.max_tokens is not None:
@@ -287,6 +291,7 @@ class OpenAICompatibleEngine:
 class VLLMEngine(OpenAICompatibleEngine):
     def __init__(self, base_url: str, **kwargs: Any) -> None:
         kwargs.setdefault("name", "vllm")
+        kwargs.setdefault("request_id_field", "request_id")
         super().__init__(base_url, **kwargs)
 
 

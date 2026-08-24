@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict
 from functools import wraps
@@ -66,6 +67,38 @@ def _worker_prompt_token_count(runner: Any, request_id: str) -> int:
     )
 
 
+def _worker_request_id(runner: Any, external_request_id: str) -> str:
+    requests = getattr(runner, "requests", None)
+    if not isinstance(requests, Mapping):
+        raise VLLMIntegrationError("active vLLM request mapping is unavailable")
+    if external_request_id in requests:
+        return external_request_id
+
+    bases = (
+        external_request_id,
+        f"cmpl-{external_request_id}-0",
+        f"chatcmpl-{external_request_id}",
+    )
+    matches = {
+        str(internal_request_id)
+        for internal_request_id in requests
+        if any(
+            str(internal_request_id) == base
+            or str(internal_request_id).startswith(base + "-")
+            for base in bases
+        )
+    }
+    if len(matches) == 1:
+        return matches.pop()
+    if not matches:
+        raise VLLMIntegrationError(
+            f"active vLLM request not found for external ID {external_request_id!r}"
+        )
+    raise VLLMIntegrationError(
+        f"external vLLM request ID {external_request_id!r} is ambiguous"
+    )
+
+
 def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
     """Install request-scoped draft control methods on a vLLM V1 worker."""
 
@@ -97,15 +130,19 @@ def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
         if proposer is None:
             return {"status": "skipped", "reason": "no_boundary_proposer"}
         try:
+            internal_request_id = _worker_request_id(
+                worker.model_runner, request_id
+            )
             if prompt_token_count is None:
                 prompt_token_count = _worker_prompt_token_count(
-                    worker.model_runner, request_id
+                    worker.model_runner, internal_request_id
                 )
             return proposer.register_draft(
-                request_id,
+                internal_request_id,
                 draft_token_ids,
                 boundary_token_ids,
                 prompt_token_count,
+                external_request_id=request_id,
             )
         except (TypeError, ValueError, VLLMIntegrationError) as error:
             return {"status": "error", "error": str(error)}
@@ -449,6 +486,8 @@ class VLLMBoundaryProposer:
             inject_window=inject_window,
         )
         self._request_ids: tuple[str, ...] = ()
+        self._alias_lock = threading.RLock()
+        self._request_aliases: dict[str, str] = {}
         install_vllm_request_id_hook()
         install_vllm_worker_rpc()
 
@@ -461,32 +500,49 @@ class VLLMBoundaryProposer:
         draft_token_ids: list[int],
         boundary_token_ids: list[int],
         prompt_token_count: int = 0,
+        *,
+        external_request_id: str | None = None,
     ) -> dict[str, Any]:
-        receipt = self.store.register(
-            DraftRequest(
-                request_id=request_id,
-                token_ids=tuple(draft_token_ids),
-                boundary=DraftBoundary(token_ids=tuple(boundary_token_ids)),
-                prompt_token_count=prompt_token_count,
+        external_id = external_request_id or request_id
+        with self._alias_lock:
+            receipt = self.store.register(
+                DraftRequest(
+                    request_id=request_id,
+                    token_ids=tuple(draft_token_ids),
+                    boundary=DraftBoundary(token_ids=tuple(boundary_token_ids)),
+                    prompt_token_count=prompt_token_count,
+                )
             )
-        )
+            previous = self._request_aliases.get(external_id)
+            if previous is not None and previous != request_id:
+                self.store.clear(previous)
+            self._request_aliases[external_id] = request_id
         return {
             "status": "ok",
-            "request_id": receipt.request_id,
+            "request_id": external_id,
+            "internal_request_id": receipt.request_id,
             "registered": receipt.registered,
             "draft_token_count": receipt.draft_token_count,
             **dict(receipt.details),
         }
 
     def clear_request(self, request_id: str) -> dict[str, Any]:
+        with self._alias_lock:
+            internal_request_id = self._request_aliases.pop(
+                request_id, request_id
+            )
         return {
             "status": "cleared",
             "request_id": request_id,
-            "removed": self.store.clear(request_id),
+            "internal_request_id": internal_request_id,
+            "removed": self.store.clear(internal_request_id),
         }
 
     def clear_all(self) -> dict[str, Any]:
-        return {"status": "cleared", "removed": self.store.clear_all()}
+        with self._alias_lock:
+            self._request_aliases.clear()
+            removed = self.store.clear_all()
+        return {"status": "cleared", "removed": removed}
 
     def status(self) -> dict[str, Any]:
         return asdict(self.store.snapshot())
