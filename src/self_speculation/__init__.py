@@ -3,12 +3,15 @@
 from .controller import ForkController, ForkRunResult, ForkTrigger, first_output_trigger
 from .decoding import (
     DecoderFactory,
+    JsonToolCallParser,
     ParserFactory,
     ParserRegistrationError,
     ParserRegistry,
     StreamingToolCallDecoder,
     TextToolCallParser,
     ToolCallDecoder,
+    default_decoder,
+    default_parser_registry,
 )
 from .engines import EngineCapabilityError, InferenceEngine, validate_request
 from .forks import (
@@ -58,6 +61,7 @@ __all__ = [
     "ForkTrigger",
     "InferenceEngine",
     "InferenceRequest",
+    "JsonToolCallParser",
     "MainChunkEvent",
     "MainCompletedEvent",
     "ParserFactory",
@@ -74,6 +78,8 @@ __all__ = [
     "ToolCallDelta",
     "ToolCallEvent",
     "__version__",
+    "default_decoder",
+    "default_parser_registry",
     "first_output_trigger",
     "validate_request",
 ]
