@@ -5,8 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from self_speculation import (
+    DraftBoundary,
+    DraftRequest,
     VLLMBoundaryProposer,
+    VLLMCollectiveRPCDraftFeedback,
+    VLLMIntegrationError,
     install_vllm_request_id_hook,
+    install_vllm_worker_rpc,
 )
 
 
@@ -46,7 +51,7 @@ class VLLMBoundaryProposerTest(unittest.TestCase):
         )
         with patch(
             "self_speculation.integrations.vllm.install_vllm_request_id_hook"
-        ):
+        ), patch("self_speculation.integrations.vllm.install_vllm_worker_rpc"):
             return VLLMBoundaryProposer(config)
 
     def test_proposes_for_matching_stable_id_after_batch_reordering(self) -> None:
@@ -80,6 +85,95 @@ class VLLMBoundaryProposerTest(unittest.TestCase):
         self.assertTrue(result["registered"])
         self.assertTrue(proposer.clear_request("main")["removed"])
         self.assertEqual(proposer.clear_all()["removed"], 0)
+
+
+class VLLMWorkerRPCBridgeTest(unittest.TestCase):
+    def test_installs_registration_cleanup_and_status_methods(self) -> None:
+        class Worker:
+            pass
+
+        proposer = VLLMBoundaryProposerTest().proposer()
+        worker = Worker()
+        worker.model_runner = SimpleNamespace(drafter=proposer)
+
+        self.assertTrue(install_vllm_worker_rpc(Worker))
+        self.assertFalse(install_vllm_worker_rpc(Worker))
+        registered = worker.self_speculation_register_draft(
+            "main", [1, 2], [9], 3
+        )
+        status = worker.self_speculation_draft_status()
+        cleared = worker.self_speculation_clear_draft("main")
+
+        self.assertTrue(registered["registered"])
+        self.assertEqual(status["active_requests"], 1)
+        self.assertTrue(cleared["removed"])
+
+    def test_skips_pipeline_workers_without_a_proposer(self) -> None:
+        class Worker:
+            pass
+
+        install_vllm_worker_rpc(Worker)
+        worker = Worker()
+        worker.model_runner = SimpleNamespace()
+        result = worker.self_speculation_register_draft("x", [1], [2])
+        self.assertEqual(result["status"], "skipped")
+
+
+class FakeAsyncEngineClient:
+    def __init__(self, results=None) -> None:
+        self.calls: list[tuple[str, float | None, tuple[object, ...]]] = []
+        self.results = results
+
+    async def collective_rpc(self, method, *, timeout=None, args=()):
+        self.calls.append((method, timeout, args))
+        if self.results is not None:
+            return self.results
+        if method.endswith("register_draft"):
+            return [
+                {"status": "ok", "registered": True, "draft_token_count": 2},
+                {"status": "skipped", "reason": "no_boundary_proposer"},
+            ]
+        return [{"status": "cleared"}, {"status": "skipped"}]
+
+
+class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_registers_and_clears_across_workers(self) -> None:
+        client = FakeAsyncEngineClient()
+        feedback = VLLMCollectiveRPCDraftFeedback(client, timeout=7)
+        draft = DraftRequest(
+            request_id="main",
+            token_ids=(20, 21),
+            boundary=DraftBoundary(token_ids=(10, 11)),
+            prompt_token_count=4,
+        )
+        receipt = await feedback.submit(draft)
+        await feedback.clear("main")
+
+        method, timeout, args = client.calls[0]
+        self.assertEqual(method, "self_speculation_register_draft")
+        self.assertEqual(timeout, 7)
+        self.assertEqual(args, ("main", [20, 21], [10, 11], 4))
+        self.assertEqual(receipt.draft_token_count, 2)
+        self.assertEqual(client.calls[1][0], "self_speculation_clear_draft")
+
+    async def test_rejects_invalid_drafts_or_missing_proposers(self) -> None:
+        feedback = VLLMCollectiveRPCDraftFeedback(
+            FakeAsyncEngineClient(results=[{"status": "skipped"}])
+        )
+        with self.assertRaisesRegex(ValueError, "token_ids"):
+            await feedback.submit(DraftRequest(request_id="x", text="raw"))
+        with self.assertRaisesRegex(ValueError, "boundary token_ids"):
+            await feedback.submit(
+                DraftRequest(request_id="x", token_ids=(1,))
+            )
+        with self.assertRaisesRegex(VLLMIntegrationError, "no vLLM worker"):
+            await feedback.submit(
+                DraftRequest(
+                    request_id="x",
+                    token_ids=(1,),
+                    boundary=DraftBoundary(token_ids=(2,)),
+                )
+            )
 
 
 if __name__ == "__main__":

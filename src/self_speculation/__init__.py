@@ -42,7 +42,13 @@ from .forks import (
     ForkRequestBuilder,
     PrefixForkBuilder,
 )
-from .integrations import VLLMBoundaryProposer, install_vllm_request_id_hook
+from .integrations import (
+    VLLMBoundaryProposer,
+    VLLMCollectiveRPCDraftFeedback,
+    VLLMIntegrationError,
+    install_vllm_request_id_hook,
+    install_vllm_worker_rpc,
+)
 from .models import (
     EngineCapabilities,
     InferenceRequest,
@@ -157,7 +163,9 @@ __all__ = [
     "TGIEngine",
     "VLLMEngine",
     "VLLMBoundaryProposer",
+    "VLLMCollectiveRPCDraftFeedback",
     "VLLMNativeEngine",
+    "VLLMIntegrationError",
     "__version__",
     "default_decoder",
     "default_draft_boundary",
@@ -166,5 +174,6 @@ __all__ = [
     "first_output_trigger",
     "format_tool_call_draft",
     "install_vllm_request_id_hook",
+    "install_vllm_worker_rpc",
     "validate_request",
 ]
