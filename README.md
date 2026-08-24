@@ -14,7 +14,8 @@ and draft feedback are replaceable components, so the same controller can be
 used with different serving engines and model-specific tool-call formats.
 
 See [the architecture guide](docs/architecture.md) for the complete D1/D3 data
-flow and failure semantics.
+flow and failure semantics, and the [engine compatibility guide](docs/engines.md)
+for setup instructions and verified-injection support.
 
 ## What is included
 
@@ -23,10 +24,11 @@ flow and failure semantics.
 - concurrent main/fork orchestration with SPORK's first-output D1 trigger;
 - prefix and callback-based fork request builders;
 - structured-delta decoding plus nine built-in text parser branches;
-- adapters for arbitrary callbacks, OpenAI-compatible servers, and native
-  vLLM asynchronous generation;
+- adapters for arbitrary callbacks, OpenAI-compatible servers, native vLLM,
+  Transformers, and `llama-cpp-python` generation;
 - portable callback/HTTP draft feedback and a request-scoped boundary store;
-- an opt-in vLLM custom proposer, worker RPC bridge, and endpoint plugin for D3;
+- verified D3 integrations for vLLM, Transformers, SGLang NGRAM, and
+  `llama-cpp-python`;
 - typed lifecycle events, best-effort acceleration failures, and strict modes.
 
 Agent loops, tool execution, benchmark harnesses, datasets, and scheduling
@@ -52,6 +54,8 @@ Optional dependencies are deliberately separated:
 | Core | `python -m pip install -e .` | custom/local engines and parsers |
 | HTTP | `python -m pip install -e ".[http]"` | OpenAI-compatible and HTTP feedback clients |
 | Server | `python -m pip install -e ".[server]"` | vLLM endpoint plugin routes |
+| Transformers | `python -m pip install -e ".[transformers]"` | native Transformers streaming and verified D3 |
+| llama.cpp Python | `python -m pip install -e ".[llama-cpp]"` | in-process llama.cpp streaming and verified D3 |
 | Development | `python -m pip install -e ".[test]"` | complete test suite |
 
 ## Minimal streaming fork
@@ -116,10 +120,12 @@ the same prefix-caching engine is what enables SPORK's D1 cache reuse.
 | Any sync or async iterable | `CallableEngine` | maps strings, dictionaries, or native chunks |
 | OpenAI-compatible SSE | `OpenAICompatibleEngine` | raw and chat completions; structured deltas |
 | vLLM server | `VLLMEngine` | also forwards stable external request IDs for D3 |
-| SGLang | `SGLangEngine` | OpenAI-compatible specialization |
-| Hugging Face TGI | `TGIEngine` | OpenAI-compatible specialization |
-| llama.cpp server | `LlamaCppEngine` | OpenAI-compatible specialization |
+| SGLang | `SGLangEngine` | forwards stable `rid`; optional NGRAM D3 plugin |
+| Hugging Face TGI | `TGIEngine` | streaming fork only; no external D3 injection API |
+| llama.cpp server | `LlamaCppEngine` | streaming fork only; no external D3 injection API |
 | In-process vLLM | `VLLMNativeEngine` | adapts `AsyncLLM`/`AsyncLLMEngine` generation |
+| In-process Transformers | `TransformersEngine` | native streaming; optional assisted-decoding D3 |
+| In-process llama.cpp | `LlamaCppPythonEngine` | native streaming; optional draft-model D3 |
 | Another runtime | `InferenceEngine` protocol | implement one async `stream(request)` method |
 
 An adapter normalizes each provider update into `StreamChunk`, keeping visible
@@ -175,6 +181,9 @@ main request ID.
 | `SporkHTTPDraftFeedback` | compatibility with original SPORK HTTP routes |
 | `VLLMHTTPDraftFeedback` | remote vLLM endpoint plugin |
 | `VLLMCollectiveRPCDraftFeedback` | in-process vLLM worker RPC |
+| `SGLangHTTPDraftFeedback` | remote SGLang NGRAM plugin control plane |
+| `TransformersEngine` | in-process assisted-decoding candidate injection |
+| `LlamaCppPythonEngine` | in-process llama.cpp draft-model injection |
 
 The store excludes prompt history, matches single- or multi-token boundaries,
 checks any already-generated action prefix, offers only the remaining suffix,
@@ -216,7 +225,8 @@ python examples/d3_in_memory.py
 
 The test suite covers controller concurrency and cleanup, every parser family,
 all engine adapters, draft formatting/feedback/storage, vLLM proposal routing,
-worker RPC, and HTTP endpoints.
+Transformers candidate verification, llama.cpp draft callbacks, SGLang NGRAM
+hooks, worker RPC, and HTTP endpoints.
 
 ## Relationship to SPORK
 

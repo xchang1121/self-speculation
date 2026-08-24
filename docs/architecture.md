@@ -63,9 +63,10 @@ class InferenceEngine(Protocol):
 keeps visible text, reasoning text, token IDs, token logprobs, structured
 tool-call deltas, finish reasons, and provider-native payloads separate.
 
-Built-in adapters cover arbitrary callbacks, OpenAI-compatible SSE servers, and
-native vLLM asynchronous generation. A custom engine only needs to normalize
-its output into this contract.
+Built-in adapters cover arbitrary callbacks, OpenAI-compatible SSE servers,
+native vLLM asynchronous generation, in-process Transformers, and in-process
+`llama-cpp-python`. A custom engine only needs to normalize its output into
+this contract.
 
 ### Fork construction
 
@@ -107,7 +108,10 @@ implementations:
 - `HTTPDraftFeedback` for a portable request-scoped sidecar;
 - `SporkHTTPDraftFeedback` for the original SPORK endpoint contract;
 - `BoundaryDraftFeedback` for an in-process `BoundaryDraftStore`;
-- vLLM collective-RPC and HTTP adapters for the custom proposer integration.
+- vLLM collective-RPC and HTTP adapters for the custom proposer integration;
+- `SGLangHTTPDraftFeedback` for the SGLang NGRAM plugin;
+- native Transformers assisted decoding and `llama-cpp-python` draft-model
+  callbacks, where the engine adapter also implements `DraftFeedback`.
 
 ### Engine-side boundary proposer
 
@@ -160,7 +164,9 @@ Draft registration routes influence inference execution and must be treated as
 administrative endpoints. Keep them on a trusted network or protect them with a
 reverse proxy. In particular, vLLM API-key handling may not cover plugin routes
 outside `/v1`; the bundled endpoint plugin is opt-in and namespaced under
-`/self-speculation` for this reason.
+`/self-speculation` for this reason. SGLang's root-level
+`/add_external_corpus` and `/remove_external_corpus` routes require the same
+protection when used as the D3 control plane.
 
 ## Upstream relationship
 
