@@ -10,6 +10,12 @@ from .openai_compatible import (
     TGIEngine,
     VLLMEngine,
 )
+from .llama_cpp_native import (
+    LlamaCppBoundaryDraftModel,
+    LlamaCppDraftRequestPredicate,
+    LlamaCppPromptRenderer,
+    LlamaCppPythonEngine,
+)
 from .transformers import (
     TransformersBoundaryCandidateGenerator,
     TransformersDraftRequestPredicate,
@@ -29,6 +35,10 @@ __all__ = [
     "EngineCapabilityError",
     "InferenceEngine",
     "LlamaCppEngine",
+    "LlamaCppBoundaryDraftModel",
+    "LlamaCppDraftRequestPredicate",
+    "LlamaCppPromptRenderer",
+    "LlamaCppPythonEngine",
     "NativePromptRenderer",
     "OpenAICompatibleEngine",
     "OpenAIStreamError",
