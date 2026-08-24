@@ -43,6 +43,7 @@ from .forks import (
     PrefixForkBuilder,
 )
 from .integrations import (
+    SelfSpeculationEndpointPlugin,
     VLLMBoundaryProposer,
     VLLMCollectiveRPCDraftFeedback,
     VLLMHTTPDraftFeedback,
@@ -152,6 +153,7 @@ __all__ = [
     "StreamChunk",
     "StreamFactory",
     "SGLangEngine",
+    "SelfSpeculationEndpointPlugin",
     "StreamSnapshot",
     "SporkHTTPDraftFeedback",
     "StreamingToolCallDecoder",

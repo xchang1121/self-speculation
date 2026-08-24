@@ -29,6 +29,7 @@ REGISTER_DRAFT_RPC = "self_speculation_register_draft"
 CLEAR_DRAFT_RPC = "self_speculation_clear_draft"
 DRAFT_STATUS_RPC = "self_speculation_draft_status"
 EngineClientResolver = Callable[[Any], Any | Awaitable[Any]]
+_PLUGIN_ENGINE_CLIENT_STATE = "_self_speculation_engine_client"
 
 
 class VLLMIntegrationError(RuntimeError):
@@ -351,6 +352,32 @@ def install_vllm_http_routes(
     add_api_route(prefix + "/status", status, methods=["GET"])
     setattr(state, marker, True)
     return True
+
+
+class SelfSpeculationEndpointPlugin:
+    """Official vLLM endpoint-plugin wrapper for the request-scoped routes."""
+
+    name = "self_speculation"
+    required_tasks = ("generate",)
+
+    def attach_router(self, app: Any) -> None:
+        install_vllm_http_routes(
+            app,
+            engine_client_resolver=lambda current_app: getattr(
+                current_app.state,
+                _PLUGIN_ENGINE_CLIENT_STATE,
+                None,
+            ),
+        )
+
+    async def init_state(
+        self,
+        engine_client: Any | None,
+        state: Any,
+        args: Any,
+    ) -> None:
+        del args
+        setattr(state, _PLUGIN_ENGINE_CLIENT_STATE, engine_client)
 
 
 def install_vllm_request_id_hook(runner_class: type[Any] | None = None) -> bool:

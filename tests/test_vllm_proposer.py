@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from self_speculation import (
     DraftBoundary,
     DraftRequest,
+    SelfSpeculationEndpointPlugin,
     VLLMBoundaryProposer,
     VLLMCollectiveRPCDraftFeedback,
     VLLMIntegrationError,
@@ -238,6 +239,22 @@ class VLLMHTTPRoutesTest(unittest.IsolatedAsyncioTestCase):
             json={"request_id": "x", "token_ids": [1]},
         )
         self.assertEqual(response.status_code, 422)
+        await client.aclose()
+
+    async def test_official_endpoint_plugin_initializes_engine_state(self) -> None:
+        app = FastAPI()
+        engine_client = FakeAsyncEngineClient()
+        plugin = SelfSpeculationEndpointPlugin()
+        plugin.attach_router(app)
+        await plugin.init_state(engine_client, app.state, SimpleNamespace())
+
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://vllm",
+        )
+        response = await client.get("/self-speculation/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["worker_results"][0]["active_requests"], 1)
         await client.aclose()
 
 

@@ -22,6 +22,9 @@ http = ["httpx>=0.27"]
 server = ["fastapi>=0.115"]
 test = ["fastapi>=0.115", "httpx>=0.27"]
 
+[project.entry-points."vllm.endpoint_plugins"]
+self_speculation = "self_speculation.integrations.vllm:SelfSpeculationEndpointPlugin"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
