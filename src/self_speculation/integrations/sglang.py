@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -20,6 +21,8 @@ from ..drafts.http import HTTPDraftFeedback
 
 SGLANG_CONTROL_PREFIX = "self-speculation:v1:"
 _STORE_ATTRIBUTE = "_self_speculation_boundary_drafts"
+_PENDING_ATTRIBUTE = "_self_speculation_pending_drafts"
+_PENDING_LOCK_ATTRIBUTE = "_self_speculation_pending_drafts_lock"
 _PLUGIN_REGISTERED = False
 
 
@@ -107,6 +110,8 @@ def _worker_init(original: Callable[..., Any], worker: Any, *args: Any, **kwargs
             inject_window=inject_window,
         ),
     )
+    setattr(worker, _PENDING_ATTRIBUTE, {})
+    setattr(worker, _PENDING_LOCK_ATTRIBUTE, threading.RLock())
     return result
 
 
@@ -134,11 +139,36 @@ def _prepare_draft_tokens(
 ) -> tuple[Any, Any]:
     original_result = original(worker, batch)
     store = _store(worker)
-    if store is None or store.snapshot().active_requests == 0:
+    if store is None:
         return original_result
 
     requests = list(getattr(batch, "reqs", ()))
     if not requests:
+        return original_result
+    pending = getattr(worker, _PENDING_ATTRIBUTE, {})
+    pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
+    resolved_pending: list[tuple[Any, tuple[int, ...], tuple[int, ...]]] = []
+    if pending_lock is not None:
+        with pending_lock:
+            for request in requests:
+                request_id = str(getattr(request, "rid", None) or "")
+                payload = pending.pop(request_id, None)
+                if payload is None:
+                    continue
+                token_ids, boundary_token_ids = payload
+                resolved_pending.append(
+                    (request, token_ids, boundary_token_ids)
+                )
+    for request, token_ids, boundary_token_ids in resolved_pending:
+        store.register(
+            DraftRequest(
+                request_id=str(request.rid),
+                token_ids=token_ids,
+                boundary=DraftBoundary(token_ids=boundary_token_ids),
+                prompt_token_count=len(request.origin_input_ids),
+            )
+        )
+    if store.snapshot().active_requests == 0:
         return original_result
     draft_token_num = int(worker.draft_token_num)
 
@@ -185,22 +215,37 @@ def _prepare_draft_tokens(
     return rows.reshape(-1), trees.reshape(-1)
 
 
-def _register_control(store: BoundaryDraftStore, payload: Mapping[str, Any]) -> int:
+def _register_control(worker: Any, payload: Mapping[str, Any]) -> int:
     if payload.get("op") != "register":
         raise SGLangIntegrationError("expected a register control payload")
     request_id = str(payload.get("request_id") or "")
+    if not request_id:
+        raise SGLangIntegrationError("request_id is required")
+    token_ids = _token_ids(payload.get("token_ids"), "token_ids")
+    boundary_token_ids = _token_ids(
+        payload.get("boundary_token_ids"), "boundary_token_ids"
+    )
+    store = _store(worker, required=True)
     prompt_token_count = payload.get("prompt_token_count")
     if prompt_token_count is None:
-        raise SGLangIntegrationError("prompt_token_count is required")
+        pending = getattr(worker, _PENDING_ATTRIBUTE, None)
+        pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
+        if not isinstance(pending, dict) or pending_lock is None:
+            raise SGLangIntegrationError("SGLang pending draft state is unavailable")
+        store.clear(request_id)
+        with pending_lock:
+            pending[request_id] = (token_ids, boundary_token_ids)
+        return min(len(token_ids), store.max_draft_tokens)
+    pending = getattr(worker, _PENDING_ATTRIBUTE, None)
+    pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
+    if isinstance(pending, dict) and pending_lock is not None:
+        with pending_lock:
+            pending.pop(request_id, None)
     receipt = store.register(
         DraftRequest(
             request_id=request_id,
-            token_ids=_token_ids(payload.get("token_ids"), "token_ids"),
-            boundary=DraftBoundary(
-                token_ids=_token_ids(
-                    payload.get("boundary_token_ids"), "boundary_token_ids"
-                )
-            ),
+            token_ids=token_ids,
+            boundary=DraftBoundary(token_ids=boundary_token_ids),
             prompt_token_count=int(prompt_token_count),
         )
     )
@@ -216,7 +261,7 @@ def _add_external_corpus(
     control = _decode_control(corpus_id)
     if control is None:
         return original(worker, corpus_id, token_chunks)
-    return _register_control(_store(worker, required=True), control)
+    return _register_control(worker, control)
 
 
 def _commit_corpus_load(
@@ -241,6 +286,11 @@ def _remove_external_corpus(
     request_id = str(control.get("request_id") or "")
     if not request_id:
         raise SGLangIntegrationError("request_id is required")
+    pending = getattr(worker, _PENDING_ATTRIBUTE, None)
+    pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
+    if isinstance(pending, dict) and pending_lock is not None:
+        with pending_lock:
+            pending.pop(request_id, None)
     _store(worker, required=True).clear(request_id)
     return None
 
@@ -250,6 +300,11 @@ def _clear_cache_pool(original: Callable[..., Any], worker: Any) -> Any:
     store = _store(worker)
     if store is not None:
         store.clear_all()
+    pending = getattr(worker, _PENDING_ATTRIBUTE, None)
+    pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
+    if isinstance(pending, dict) and pending_lock is not None:
+        with pending_lock:
+            pending.clear()
     return result
 
 
@@ -350,8 +405,6 @@ class SGLangHTTPDraftFeedback(HTTPDraftFeedback):
             raise ValueError("SGLang draft feedback requires token_ids")
         if draft.boundary is None or not draft.boundary.token_ids:
             raise ValueError("SGLang draft feedback requires boundary token_ids")
-        if draft.prompt_token_count is None:
-            raise ValueError("SGLang draft feedback requires prompt_token_count")
         return {
             "corpus_id": _encode_control(
                 {

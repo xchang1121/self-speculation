@@ -76,8 +76,11 @@ class SGLangIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 request_id="main-request",
                 token_ids=(10, 11),
                 boundary=DraftBoundary(token_ids=(9,)),
-                prompt_token_count=1,
             )
+        )
+        self.assertEqual(
+            getattr(worker, integration._STORE_ATTRIBUTE).snapshot().active_requests,
+            0,
         )
 
         original_drafts = np.asarray([2, 3, 4, 5, 6, 7, 8, 9], dtype=np.int64)
@@ -116,6 +119,7 @@ class SGLangIntegrationTest(unittest.IsolatedAsyncioTestCase):
             getattr(worker, integration._STORE_ATTRIBUTE).snapshot().injections,
             1,
         )
+        self.assertEqual(getattr(worker, integration._PENDING_ATTRIBUTE), {})
         self.assertEqual(json.loads(requests[0].content)["documents"], ["_"])
 
         await feedback.clear("main-request")
