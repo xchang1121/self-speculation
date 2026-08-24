@@ -90,6 +90,7 @@ class BoundaryDraftStoreTest(unittest.TestCase):
                 request_id="text",
                 token_ids=(1,),
                 boundary=DraftBoundary(text="boundary"),
+                prompt_token_count=0,
             )
         )
         self.assertEqual(store.offer("text", [7, 8]).token_ids, (1,))
@@ -105,6 +106,14 @@ class BoundaryDraftStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "boundary"):
             BoundaryDraftStore().register(
                 DraftRequest(request_id="no-boundary", token_ids=(1,))
+            )
+        with self.assertRaisesRegex(ValueError, "prompt_token_count"):
+            BoundaryDraftStore().register(
+                DraftRequest(
+                    request_id="no-prompt-length",
+                    token_ids=(1,),
+                    boundary=DraftBoundary(token_ids=(2,)),
+                )
             )
         with self.assertRaisesRegex(ValueError, "sequence_length"):
             store.offer("text", [1], sequence_length=2)

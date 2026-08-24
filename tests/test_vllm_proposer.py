@@ -99,18 +99,28 @@ class VLLMWorkerRPCBridgeTest(unittest.TestCase):
 
         proposer = VLLMBoundaryProposerTest().proposer()
         worker = Worker()
-        worker.model_runner = SimpleNamespace(drafter=proposer)
+        worker.model_runner = SimpleNamespace(
+            drafter=proposer,
+            requests={
+                "main": SimpleNamespace(prompt_token_ids=[9, 8, 7])
+            },
+        )
 
         self.assertTrue(install_vllm_worker_rpc(Worker))
         self.assertFalse(install_vllm_worker_rpc(Worker))
         registered = worker.self_speculation_register_draft(
-            "main", [1, 2], [9], 3
+            "main", [1, 2], [9], None
         )
         status = worker.self_speculation_draft_status()
+        proposer.set_request_ids(("main",))
+        before_new_boundary = proposer.propose([[1]], [3], [[9, 8, 7]])
+        at_new_boundary = proposer.propose([[1]], [4], [[9, 8, 7, 9]])
         cleared = worker.self_speculation_clear_draft("main")
 
         self.assertTrue(registered["registered"])
         self.assertEqual(status["active_requests"], 1)
+        self.assertEqual(before_new_boundary, [[]])
+        self.assertEqual(at_new_boundary, [[1, 2]])
         self.assertTrue(cleared["removed"])
 
     def test_skips_pipeline_workers_without_a_proposer(self) -> None:

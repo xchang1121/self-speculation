@@ -43,6 +43,28 @@ def _worker_proposer(worker: Any) -> Any | None:
     return proposer
 
 
+def _worker_prompt_token_count(runner: Any, request_id: str) -> int:
+    requests = getattr(runner, "requests", None)
+    request_state = requests.get(request_id) if isinstance(requests, Mapping) else None
+    if request_state is None:
+        raise VLLMIntegrationError(
+            f"active vLLM request state not found for {request_id!r}"
+        )
+    count = getattr(request_state, "num_prompt_tokens", None)
+    if count is not None:
+        return int(count)
+    prompt_token_ids = getattr(request_state, "prompt_token_ids", None)
+    if prompt_token_ids is not None:
+        return len(prompt_token_ids)
+    prompt_embeds = getattr(request_state, "prompt_embeds", None)
+    shape = getattr(prompt_embeds, "shape", None)
+    if shape:
+        return int(shape[0])
+    raise VLLMIntegrationError(
+        f"prompt length is unavailable for active request {request_id!r}"
+    )
+
+
 def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
     """Install request-scoped draft control methods on a vLLM V1 worker."""
 
@@ -68,17 +90,24 @@ def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
         request_id: str,
         draft_token_ids: list[int],
         boundary_token_ids: list[int],
-        prompt_token_count: int = 0,
+        prompt_token_count: int | None = None,
     ) -> dict[str, Any]:
         proposer = _worker_proposer(worker)
         if proposer is None:
             return {"status": "skipped", "reason": "no_boundary_proposer"}
-        return proposer.register_draft(
-            request_id,
-            draft_token_ids,
-            boundary_token_ids,
-            prompt_token_count,
-        )
+        try:
+            if prompt_token_count is None:
+                prompt_token_count = _worker_prompt_token_count(
+                    worker.model_runner, request_id
+                )
+            return proposer.register_draft(
+                request_id,
+                draft_token_ids,
+                boundary_token_ids,
+                prompt_token_count,
+            )
+        except (TypeError, ValueError, VLLMIntegrationError) as error:
+            return {"status": "error", "error": str(error)}
 
     def clear(worker: Any, request_id: str) -> dict[str, Any]:
         proposer = _worker_proposer(worker)
@@ -156,7 +185,7 @@ class VLLMCollectiveRPCDraftFeedback:
                 draft.request_id,
                 list(draft.token_ids),
                 list(draft.boundary.token_ids),
-                draft.prompt_token_count or 0,
+                draft.prompt_token_count,
             ),
         )
         registered = [

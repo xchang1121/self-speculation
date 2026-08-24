@@ -107,8 +107,12 @@ class BoundaryDraftStore:
         if not draft.token_ids:
             raise ValueError("engine-side draft feedback requires token_ids")
         boundary_tokens = self._boundary_tokens(draft)
+        if draft.prompt_token_count is None:
+            raise ValueError(
+                "engine-side draft feedback requires prompt_token_count"
+            )
         token_ids = draft.token_ids[: self.max_draft_tokens]
-        prompt_token_count = draft.prompt_token_count or 0
+        prompt_token_count = draft.prompt_token_count
         with self._lock:
             replaced = draft.request_id in self._requests
             self._requests[draft.request_id] = _RequestDraft(
