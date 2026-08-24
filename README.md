@@ -1,34 +1,236 @@
 # self-speculation
 
-`self-speculation` is a small, engine-agnostic library for the reusable core of
-[SPORK](https://github.com/baihuajun24/spork): start one speculative streaming
-fork from an already-running inference stream, decode that fork into structured
-tool calls, and optionally feed the speculative action back to a capable engine
-as draft tokens for verified speculative decoding.
+`self-speculation` extracts the reusable inference mechanisms from
+[SPORK](https://github.com/baihuajun24/spork) into a small, engine-agnostic
+Python library:
 
-The project intentionally excludes benchmark harnesses, datasets, tool
-execution, agent loops, and model-specific serving launchers. Its public surface
-is organized around four independent extension points:
+1. fork one speculative continuation from a running streaming inference;
+2. decode that continuation into one or more structured tool calls;
+3. optionally return the decoded action to the main engine as draft tokens for
+   target-model verification (SPORK D3).
 
-- a one-method streaming inference-engine protocol;
-- a fork controller that starts after the main stream has produced its first
-  useful chunk, preserving SPORK's prefix-cache-friendly D1 timing;
-- a registry of streaming tool-call parser branches;
-- an optional draft-feedback protocol for D3-style engine-side verification.
+The authoritative main stream always continues independently. Forking, parsing,
+and draft feedback are replaceable components, so the same controller can be
+used with different serving engines and model-specific tool-call formats.
 
-The refactor is currently being implemented feature by feature. Each completed
-feature is tested, committed, and pushed independently.
+See [the architecture guide](docs/architecture.md) for the complete D1/D3 data
+flow and failure semantics.
 
-## Attribution
+## What is included
 
-This repository is derived from SPORK and preserves its Git history and MIT
-license. The source repository is tracked as the `upstream` Git remote:
+- a dependency-free streaming engine protocol and normalized request/chunk
+  models;
+- concurrent main/fork orchestration with SPORK's first-output D1 trigger;
+- prefix and callback-based fork request builders;
+- structured-delta decoding plus nine built-in text parser branches;
+- adapters for arbitrary callbacks, OpenAI-compatible servers, and native
+  vLLM asynchronous generation;
+- portable callback/HTTP draft feedback and a request-scoped boundary store;
+- an opt-in vLLM custom proposer, worker RPC bridge, and endpoint plugin for D3;
+- typed lifecycle events, best-effort acceleration failures, and strict modes.
 
-- SPORK source: <https://github.com/baihuajun24/spork>
-- working fork used as the starting point: <https://github.com/xchang1121/spork>
-- paper: [SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference](https://arxiv.org/abs/2607.03333)
+Agent loops, tool execution, benchmark harnesses, datasets, and scheduling
+policy are intentionally out of scope.
 
-If this project contributes to research results, cite the SPORK paper:
+## Install and run the demonstration
+
+Python 3.10 or newer is required.
+
+```bash
+python -m pip install -e ".[test]"
+python examples/d3_in_memory.py
+```
+
+The example runs without an external model server. It demonstrates the full
+flow: first-output fork, streaming tool-call decode, request-scoped draft
+registration, boundary matching, one proposal, and cleanup.
+
+Optional dependencies are deliberately separated:
+
+| Extra | Install command | Purpose |
+| --- | --- | --- |
+| Core | `python -m pip install -e .` | custom/local engines and parsers |
+| HTTP | `python -m pip install -e ".[http]"` | OpenAI-compatible and HTTP feedback clients |
+| Server | `python -m pip install -e ".[server]"` | vLLM endpoint plugin routes |
+| Development | `python -m pip install -e ".[test]"` | complete test suite |
+
+## Minimal streaming fork
+
+This example uses a raw completion endpoint. The prompt must already use the
+served model's chat/tool template.
+
+```python
+import asyncio
+
+from self_speculation import (
+    ForkController,
+    InferenceRequest,
+    PrefixForkBuilder,
+    VLLMEngine,
+    default_decoder,
+)
+
+
+async def main() -> None:
+    async with VLLMEngine(
+        "http://127.0.0.1:8000/v1",
+        prefix_cache=True,
+    ) as engine:
+        controller = ForkController(
+            engine,
+            PrefixForkBuilder(
+                forced_prefix="<tool_call>",
+                max_tokens=128,
+                temperature=0.0,
+            ),
+            # The forced prefix is normally not repeated by the server.
+            lambda: default_decoder(
+                "tagged_json",
+                initial_text="<tool_call>",
+            ),
+        )
+        result = await controller.run(
+            InferenceRequest(
+                prompt="A fully rendered model prompt",
+                model="YOUR_MODEL",
+                max_tokens=512,
+            )
+        )
+
+    print(result.main.content)  # authoritative model output
+    print(result.tool_calls)    # speculative fork prediction
+
+
+asyncio.run(main())
+```
+
+Use `ForkController.stream()` instead of `run()` when an application needs
+main chunks, fork chunks, completed calls, draft receipts, or failures as typed
+events in real time. A separate `fork_engine` can be supplied, although using
+the same prefix-caching engine is what enables SPORK's D1 cache reuse.
+
+## Engine adapters
+
+| Engine family | Adapter | Notes |
+| --- | --- | --- |
+| Any sync or async iterable | `CallableEngine` | maps strings, dictionaries, or native chunks |
+| OpenAI-compatible SSE | `OpenAICompatibleEngine` | raw and chat completions; structured deltas |
+| vLLM server | `VLLMEngine` | also forwards stable external request IDs for D3 |
+| SGLang | `SGLangEngine` | OpenAI-compatible specialization |
+| Hugging Face TGI | `TGIEngine` | OpenAI-compatible specialization |
+| llama.cpp server | `LlamaCppEngine` | OpenAI-compatible specialization |
+| In-process vLLM | `VLLMNativeEngine` | adapts `AsyncLLM`/`AsyncLLMEngine` generation |
+| Another runtime | `InferenceEngine` protocol | implement one async `stream(request)` method |
+
+An adapter normalizes each provider update into `StreamChunk`, keeping visible
+text, reasoning, token IDs, logprobs, structured tool deltas, and native data
+separate. Engine-specific request options remain available through
+`InferenceRequest.extra`.
+
+## Tool-call parser branches
+
+`default_decoder("auto")` tries the registered text branches in order and
+locks onto the first one that produces a call. Provider-native structured tool
+deltas are decoded directly and take precedence over text parsing.
+
+| Decoder name | Supported shape or markers |
+| --- | --- |
+| `deepseek_dsml` | DeepSeek DSML tool-call markup |
+| `deepseek_v3` | DeepSeek V3/R1 special-token function syntax |
+| `qwen_xml` | Qwen XML function and parameter elements |
+| `tagged_json` | Hermes/Qwen/SPORK JSON inside `<tool_call>` |
+| `mistral_json` | Mistral `[TOOL_CALLS]` JSON |
+| `llama_json` | Llama JSON after `<|python_tag|>` |
+| `pythonic` | Python-like function calls, parsed without executing code |
+| `xlam_json` | xLAM fenced, tagged, reasoning-prefixed, or bare JSON |
+| `bare_json` | a bare JSON object or list |
+
+Parsers are incremental: delimiters and JSON/XML fragments may cross arbitrary
+transport chunks. Registering another branch does not require changing the
+controller:
+
+```python
+registry = default_parser_registry()
+registry.register("my_format", MyStreamingParser)
+controller = ForkController(
+    engine,
+    fork_builder,
+    lambda: registry.decoder("my_format"),
+)
+```
+
+## D3 draft feedback
+
+Decoding a fork predicts an action, but it only accelerates main-model token
+generation when the engine can verify that prediction through its speculative
+decoding path. `ToolCallDraftBuilder` formats and tokenizes the action after its
+model-specific boundary; a `DraftFeedback` adapter then registers it under the
+main request ID.
+
+| Feedback path | Intended use |
+| --- | --- |
+| `CallableDraftFeedback` | application callback or custom runtime |
+| `BoundaryDraftFeedback` + `BoundaryDraftStore` | in-process engines and testing |
+| `HTTPDraftFeedback` | portable request-scoped sidecar |
+| `SporkHTTPDraftFeedback` | compatibility with original SPORK HTTP routes |
+| `VLLMHTTPDraftFeedback` | remote vLLM endpoint plugin |
+| `VLLMCollectiveRPCDraftFeedback` | in-process vLLM worker RPC |
+
+The store excludes prompt history, matches single- or multi-token boundaries,
+checks any already-generated action prefix, offers only the remaining suffix,
+and fires at most once per request. The target engine still verifies every
+proposed token; disagreement falls back to ordinary target-model decoding.
+
+### vLLM quick start
+
+Install the package in the vLLM frontend and worker environments, then opt in
+to the endpoint plugin and custom proposer:
+
+```bash
+export VLLM_PLUGINS=self_speculation
+vllm serve YOUR_MODEL \
+  --enable-prefix-caching \
+  --speculative-config '{
+    "method": "custom_class",
+    "model": "self_speculation.integrations.vllm.VLLMBoundaryProposer",
+    "num_speculative_tokens": 20
+  }'
+```
+
+The controller pairs `VLLMEngine` with `VLLMHTTPDraftFeedback`. See the
+[vLLM integration guide](docs/vllm.md) for complete client code, native-engine
+usage, model-format alignment, request-ID routing, security, and
+troubleshooting.
+
+The `/self-speculation/*` routes affect inference execution. Keep them on a
+trusted network or protect them at a reverse proxy; do not assume that a vLLM
+API key covers plugin routes outside `/v1`.
+
+## Development
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q src examples tests
+python examples/d3_in_memory.py
+```
+
+The test suite covers controller concurrency and cleanup, every parser family,
+all engine adapters, draft formatting/feedback/storage, vLLM proposal routing,
+worker RPC, and HTTP endpoints.
+
+## Relationship to SPORK
+
+This repository is a focused reorganization of
+**SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference**. The
+D1/D3 design, upstream MIT license, and pre-refactor Git history are retained
+and attributed.
+
+- Original SPORK repository: <https://github.com/baihuajun24/spork>
+- Starting fork: <https://github.com/xchang1121/spork>
+- Paper: <https://arxiv.org/abs/2607.03333>
+- Additional attribution: [NOTICE.md](NOTICE.md)
+
+If this work contributes to research results, cite the SPORK paper:
 
 ```bibtex
 @misc{bai2026spork,
@@ -40,8 +242,6 @@ If this project contributes to research results, cite the SPORK paper:
   primaryClass  = {cs.DC}
 }
 ```
-
-See [NOTICE.md](NOTICE.md) for the retained upstream attribution.
 
 ## License
 
