@@ -202,6 +202,11 @@ also records a rejected target-token prefix-consensus tie-break: it increased
 rejected verifier work without saving an additional target step, so production
 candidate ordering remains unchanged.
 
+The [real-Transformers D3 ablation](docs/transformers-d3-real-model-ablation-2026-08-25.md)
+separately verifies the engine path with a pinned tiny model: an exact 28-token
+replay preserves output and reduces target forward calls from 32 to 4. This is
+an integration upper bound, not a live candidate-accuracy claim.
+
 ### Agent-facing unified control plane
 
 `CandidateBundleBuilder` converts ranked concrete tool calls from any agent
