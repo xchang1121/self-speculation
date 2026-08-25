@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -181,6 +183,7 @@ class SnapshotForkRunner:
             raise ValueError("max_draft_tokens must be positive")
 
     async def run(self, payload: Mapping[str, Any]) -> DraftRequest:
+        fork_started_at = time.perf_counter()
         request_id = str(payload.get("request_id") or "").strip()
         if not request_id:
             raise ValueError("request_id must not be empty")
@@ -232,12 +235,26 @@ class SnapshotForkRunner:
         )
         fork_request = await builder.build(main_request, snapshot)
         validate_request(self.engine, fork_request)
+        fork_built_at = time.perf_counter()
         decoder_name = str(options.get("decoder") or "auto")
         decoder = default_decoder(decoder_name, initial_text=forced_prefix)
         iterator = self.engine.stream(fork_request).__aiter__()
         decoded: list[ToolCall] = []
+        first_chunk_ms: float | None = None
+        output_chunks = 0
+        decoded_tokens = 0
+        logprob_values: list[float] = []
         try:
             async for chunk in iterator:
+                if first_chunk_ms is None:
+                    first_chunk_ms = (time.perf_counter() - fork_built_at) * 1000
+                output_chunks += int(chunk.has_output)
+                decoded_tokens += max(len(chunk.token_ids), len(chunk.logprobs))
+                logprob_values.extend(
+                    value.logprob
+                    for value in chunk.logprobs
+                    if value.logprob is not None and math.isfinite(value.logprob)
+                )
                 decoded.extend(decoder.feed(chunk))
                 if decoded:
                     break
@@ -289,6 +306,16 @@ class SnapshotForkRunner:
                 default=repr,
             ).encode("utf-8")
         ).hexdigest()[:16]
+        fork_completed_at = time.perf_counter()
+        logprob_observation = (
+            {
+                "token_count": len(logprob_values),
+                "mean": sum(logprob_values) / len(logprob_values),
+                "minimum": min(logprob_values),
+            }
+            if logprob_values
+            else {"token_count": 0}
+        )
         return await draft_builder.build_for_request(
             calls,
             request_id=request_id,
@@ -297,6 +324,15 @@ class SnapshotForkRunner:
                 "candidate_index": "self",
                 "sources": ("self-speculation",),
                 "fork_request_id": fork_request.request_id,
+                "fork": {
+                    "build_ms": (fork_built_at - fork_started_at) * 1000,
+                    "decode_ms": (fork_completed_at - fork_built_at) * 1000,
+                    "total_ms": (fork_completed_at - fork_started_at) * 1000,
+                    "first_chunk_ms": first_chunk_ms,
+                    "output_chunks": output_chunks,
+                    "decoded_tokens": decoded_tokens,
+                    "logprobs": logprob_observation,
+                },
             },
         )
 
@@ -339,9 +375,9 @@ class SelfSpeculationControlPlane:
         async with state.lock:
             self._ensure_open(request_id, state)
             state.external = bundle
-            return await self.feedback.submit_bundle(
-                self._combined(bundle.request_id, state)
-            )
+            combined = self._combined(bundle.request_id, state)
+            receipt = await self.feedback.submit_bundle(combined)
+            return _receipt_with_bundle_observation(receipt, combined)
 
     async def fork(self, payload: Mapping[str, Any]) -> DraftReceipt:
         if self.fork_runner is None:
@@ -352,9 +388,9 @@ class SelfSpeculationControlPlane:
         async with state.lock:
             self._ensure_open(request_id, state)
             state.self_draft = draft
-            return await self.feedback.submit_bundle(
-                self._combined(draft.request_id, state)
-            )
+            combined = self._combined(draft.request_id, state)
+            receipt = await self.feedback.submit_bundle(combined)
+            return _receipt_with_bundle_observation(receipt, combined)
 
     async def clear(self, request_id: str) -> None:
         request_id = request_id.strip()
@@ -610,7 +646,58 @@ def _merge_draft_metadata(
     }
     if provenance:
         metadata["provenance"] = provenance
+    fork = duplicate.metadata.get("fork") or primary.metadata.get("fork")
+    if isinstance(fork, Mapping):
+        metadata["fork"] = dict(fork)
     return replace(primary, metadata=metadata)
+
+
+def _receipt_with_bundle_observation(
+    receipt: DraftReceipt, bundle: DraftBundle
+) -> DraftReceipt:
+    """Attach bounded, JSON-safe candidate diagnostics without changing feedback."""
+
+    candidates = tuple(_draft_observation(draft) for draft in bundle.drafts)
+    return replace(
+        receipt,
+        details={
+            **dict(receipt.details),
+            "bundle": {
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+            },
+        },
+    )
+
+
+def _draft_observation(draft: DraftRequest) -> dict[str, Any]:
+    metadata = draft.metadata
+    candidate_id = metadata.get("candidate_id")
+    candidate_ids = _unique_metadata(
+        tuple(value for value in (candidate_id,) if value is not None)
+        + _metadata_array(metadata.get("candidate_ids"))
+    )
+    observation: dict[str, Any] = {
+        "candidate_ids": candidate_ids,
+        "sources": _metadata_array(metadata.get("sources")),
+        "draft_token_count": len(draft.token_ids),
+        "tool_calls": tuple(
+            {
+                "name": call.name,
+                "arguments": call.arguments,
+                "index": call.index,
+                "format": call.format,
+            }
+            for call in draft.tool_calls
+        ),
+    }
+    score = metadata.get("score")
+    if isinstance(score, Mapping):
+        observation["score"] = dict(score)
+    fork = metadata.get("fork")
+    if isinstance(fork, Mapping):
+        observation["fork"] = dict(fork)
+    return observation
 
 
 __all__ = [

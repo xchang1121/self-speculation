@@ -17,6 +17,7 @@ from self_speculation import (
     SelfSpeculationControlPlane,
     SnapshotForkRunner,
     StreamChunk,
+    TokenLogprob,
     install_self_speculation_routes,
 )
 
@@ -143,7 +144,12 @@ class ForkEngine:
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>'
+            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>',
+            token_ids=(1, 2),
+            logprobs=(
+                TokenLogprob(token="write", logprob=-0.2),
+                TokenLogprob(token="call", logprob=-0.4),
+            ),
         )
 
 
@@ -205,6 +211,24 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             str(merged.drafts[-1].metadata["candidate_id"]).startswith("self:")
         )
+        observed = receipt.details["bundle"]["candidates"][-1]
+        self.assertEqual(
+            observed["tool_calls"],
+            (
+                {
+                    "name": "write",
+                    "arguments": {"path": "out.txt"},
+                    "index": 0,
+                    "format": "tagged_json",
+                },
+            ),
+        )
+        self.assertEqual(observed["fork"]["decoded_tokens"], 2)
+        self.assertEqual(
+            observed["fork"]["logprobs"],
+            {"token_count": 2, "mean": -0.30000000000000004, "minimum": -0.4},
+        )
+        self.assertGreaterEqual(observed["fork"]["total_ms"], 0)
         self.assertEqual(
             engine.requests[0].prompt,
             "PROMPTobserved<tool_call>",
