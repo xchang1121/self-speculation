@@ -196,6 +196,11 @@ The default action-draft cap is 28 tokens, the smallest saturation point in the
 [recorded D3 length ablation](docs/d3-draft-length-ablation-2026-08-25.md);
 explicit application and engine caps still take precedence.
 
+The [source-neutral ranking ablation](docs/source-neutral-ranking-ablation-2026-08-25.md)
+also records a rejected target-token prefix-consensus tie-break: it increased
+rejected verifier work without saving an additional target step, so production
+candidate ordering remains unchanged.
+
 ### Agent-facing unified control plane
 
 `CandidateBundleBuilder` converts ranked concrete tool calls from any agent

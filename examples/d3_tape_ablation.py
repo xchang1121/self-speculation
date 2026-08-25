@@ -29,6 +29,7 @@ class ParsedExchange:
 
 @dataclass(frozen=True, slots=True)
 class DraftLengthResult:
+    ordering: str
     max_draft_tokens: int
     opportunities: int
     candidate_count: int
@@ -148,6 +149,35 @@ def _common_prefix(left: Sequence[int], right: Sequence[int]) -> int:
     return length
 
 
+def _order_candidates(
+    candidates: Sequence[Sequence[int]], *, limit: int, ordering: str
+) -> tuple[Sequence[int], ...]:
+    """Order an equal-confidence group without consulting its source label.
+
+    Pairwise prefix consensus is the medoid objective for the verifier: under
+    an uninformative (uniform) prior over the tied candidates, it maximizes the
+    expected number of immediately accepted draft tokens.
+    """
+
+    if ordering == "completion":
+        return tuple(candidates)
+    if ordering != "prefix-consensus":
+        raise ValueError(f"unsupported candidate ordering: {ordering}")
+
+    truncated = tuple(tuple(candidate[:limit]) for candidate in candidates)
+    consensus = tuple(
+        sum(_common_prefix(candidate, peer) for peer in truncated)
+        for candidate in truncated
+    )
+    return tuple(
+        candidates[index]
+        for index in sorted(
+            range(len(candidates)),
+            key=lambda index: (-consensus[index], index),
+        )
+    )
+
+
 def _simulate(
     actual: Sequence[int], candidates: Sequence[Sequence[int]], limit: int
 ) -> tuple[int, int, int, int]:
@@ -183,6 +213,7 @@ def analyze(
     drafter_model: str,
     tokenizer: Any,
     limits: Sequence[int],
+    orderings: Sequence[str] = ("completion",),
 ) -> tuple[DraftLengthResult, ...]:
     drafters: dict[str, list[ParsedExchange]] = defaultdict(list)
     for exchange in exchanges:
@@ -222,34 +253,39 @@ def analyze(
             opportunities.append((actual, tuple(distinct)))
 
     results = []
-    for limit in limits:
-        actor_tokens = sum(len(actual) for actual, _ in opportunities)
-        candidate_count = sum(len(candidates) for _, candidates in opportunities)
-        proposals = proposed = accepted = target_steps = 0
-        for actual, candidates in opportunities:
-            steps, proposal_count, offered, matched = _simulate(actual, candidates, limit)
-            target_steps += steps
-            proposals += proposal_count
-            proposed += offered
-            accepted += matched
-        rejected = proposed - accepted
-        saved = actor_tokens - target_steps
-        results.append(
-            DraftLengthResult(
-                max_draft_tokens=limit,
-                opportunities=len(opportunities),
-                candidate_count=candidate_count,
-                actor_tokens=actor_tokens,
-                proposals=proposals,
-                proposed_tokens=proposed,
-                accepted_tokens=accepted,
-                rejected_tokens=rejected,
-                acceptance_rate=accepted / proposed if proposed else 0.0,
-                target_steps=target_steps,
-                target_steps_saved=saved,
-                target_step_reduction=saved / actor_tokens if actor_tokens else 0.0,
+    for ordering in orderings:
+        for limit in limits:
+            actor_tokens = sum(len(actual) for actual, _ in opportunities)
+            candidate_count = sum(
+                len(candidates) for _, candidates in opportunities
             )
-        )
+            proposals = proposed = accepted = target_steps = 0
+            for actual, candidates in opportunities:
+                ranked = _order_candidates(candidates, limit=limit, ordering=ordering)
+                steps, proposal_count, offered, matched = _simulate(actual, ranked, limit)
+                target_steps += steps
+                proposals += proposal_count
+                proposed += offered
+                accepted += matched
+            rejected = proposed - accepted
+            saved = actor_tokens - target_steps
+            results.append(
+                DraftLengthResult(
+                    ordering=ordering,
+                    max_draft_tokens=limit,
+                    opportunities=len(opportunities),
+                    candidate_count=candidate_count,
+                    actor_tokens=actor_tokens,
+                    proposals=proposals,
+                    proposed_tokens=proposed,
+                    accepted_tokens=accepted,
+                    rejected_tokens=rejected,
+                    acceptance_rate=accepted / proposed if proposed else 0.0,
+                    target_steps=target_steps,
+                    target_steps_saved=saved,
+                    target_step_reduction=saved / actor_tokens if actor_tokens else 0.0,
+                )
+            )
     return tuple(results)
 
 
@@ -262,18 +298,23 @@ def main() -> None:
     parser.add_argument("--revision")
     parser.add_argument("--format", default="tagged_json")
     parser.add_argument("--limits", default="4,8,12,20,32")
+    parser.add_argument("--orderings", default="completion,prefix-consensus")
     args = parser.parse_args()
 
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.revision)
     limits = tuple(int(item) for item in args.limits.split(",") if int(item) > 0)
+    orderings = tuple(
+        item.strip() for item in args.orderings.split(",") if item.strip()
+    )
     results = analyze(
         parse_tape(args.tape, args.format),
         actor_model=args.actor_model,
         drafter_model=args.drafter_model,
         tokenizer=tokenizer,
         limits=limits,
+        orderings=orderings,
     )
     print(
         json.dumps(
