@@ -22,6 +22,7 @@ from ..drafts import (
     DraftBoundary,
     DraftReceipt,
     DraftRequest,
+    DraftVerificationOutcome,
     HTTPDraftFeedback,
     normalize_draft_receipt,
 )
@@ -385,8 +386,25 @@ class VLLMCollectiveRPCDraftFeedback:
             },
         )
 
-    async def clear(self, request_id: str) -> None:
-        await self._rpc(CLEAR_DRAFT_RPC, (request_id,))
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
+        results = await self._rpc(CLEAR_DRAFT_RPC, (request_id,))
+        outcomes = [
+            DraftVerificationOutcome.from_mapping(request_id, verification)
+            for result in results
+            for verification in (result.get("verification"),)
+            if isinstance(verification, Mapping)
+        ]
+        return max(
+            outcomes,
+            key=lambda outcome: (
+                len(outcome.steps),
+                outcome.proposed_tokens,
+                -outcome.unresolved_proposals,
+            ),
+            default=None,
+        )
 
     async def status(self) -> tuple[Mapping[str, Any], ...]:
         return await self._rpc(DRAFT_STATUS_RPC, ())
@@ -627,10 +645,18 @@ def install_vllm_http_routes(
         if not request_id:
             raise HTTPException(status_code=422, detail="request_id must not be empty")
         try:
-            await (await feedback()).clear(request_id)
+            verification = await (await feedback()).clear(request_id)
         except VLLMIntegrationError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
-        return {"status": "cleared", "request_id": request_id}
+        return {
+            "status": "cleared",
+            "request_id": request_id,
+            **(
+                {"verification": verification.to_mapping()}
+                if verification is not None
+                else {}
+            ),
+        }
 
     async def status() -> dict[str, Any]:
         try:
@@ -838,11 +864,17 @@ class VLLMBoundaryProposer:
             internal_request_id = self._request_aliases.pop(
                 request_id, request_id
             )
+        verification = self.store.take_outcome(internal_request_id)
         return {
             "status": "cleared",
             "request_id": request_id,
             "internal_request_id": internal_request_id,
-            "removed": self.store.clear(internal_request_id),
+            "removed": verification is not None,
+            **(
+                {"verification": verification.to_mapping()}
+                if verification is not None
+                else {}
+            ),
         }
 
     def clear_all(self) -> dict[str, Any]:

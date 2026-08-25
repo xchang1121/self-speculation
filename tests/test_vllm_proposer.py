@@ -113,6 +113,15 @@ class VLLMBoundaryProposerTest(unittest.TestCase):
         self.assertEqual(first, [[20, 21]])
         self.assertEqual(fallback, [[30]])
         self.assertEqual(proposer.status()["fallback_injections"], 1)
+        cleared = proposer.clear_request("main")
+        verification = cleared["verification"]
+        self.assertEqual(verification["num_draft_tokens"], 2)
+        self.assertEqual(verification["num_accepted_draft_tokens"], 1)
+        self.assertEqual(verification["num_rejected_draft_tokens"], 1)
+        self.assertEqual(verification["steps"][0]["candidate_id"], "first")
+        self.assertEqual(verification["unresolved_proposals"], 1)
+        self.assertEqual(verification["unresolved_draft_tokens"], 1)
+        self.assertEqual(proposer.status()["unresolved_draft_tokens"], 1)
 
 
 class VLLMWorkerRPCBridgeTest(unittest.TestCase):
@@ -233,9 +242,34 @@ class ActivatingEngineClient(FakeAsyncEngineClient):
         return [{"status": "cleared"}]
 
 
+class VerificationEngineClient(FakeAsyncEngineClient):
+    async def collective_rpc(self, method, *, timeout=None, args=()):
+        if method.endswith("clear_draft"):
+            self.calls.append((method, timeout, args))
+            return [
+                {
+                    "status": "cleared",
+                    "verification": {
+                        "num_spec_steps": 1,
+                        "num_draft_tokens": 2,
+                        "num_accepted_draft_tokens": 1,
+                        "num_rejected_draft_tokens": 1,
+                        "per_step_drafted": [2],
+                        "per_step_accepted": [1],
+                    },
+                },
+                {"status": "skipped", "reason": "no_boundary_proposer"},
+            ]
+        return await super().collective_rpc(
+            method,
+            timeout=timeout,
+            args=args,
+        )
+
+
 class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_registers_and_clears_across_workers(self) -> None:
-        client = FakeAsyncEngineClient()
+        client = VerificationEngineClient()
         feedback = VLLMCollectiveRPCDraftFeedback(client, timeout=7)
         draft = DraftRequest(
             request_id="main",
@@ -244,7 +278,7 @@ class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
             prompt_token_count=4,
         )
         receipt = await feedback.submit(draft)
-        await feedback.clear("main")
+        outcome = await feedback.clear("main")
 
         method, timeout, args = client.calls[0]
         self.assertEqual(method, "self_speculation_register_draft")
@@ -252,6 +286,8 @@ class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args, ("main", [20, 21], [10, 11], 4))
         self.assertEqual(receipt.draft_token_count, 2)
         self.assertEqual(client.calls[1][0], "self_speculation_clear_draft")
+        self.assertEqual(outcome.accepted_tokens if outcome else None, 1)
+        self.assertEqual(outcome.rejected_tokens if outcome else None, 1)
 
     async def test_registers_an_ordered_bundle_across_workers(self) -> None:
         client = FakeAsyncEngineClient()
@@ -311,7 +347,7 @@ class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
 class VLLMHTTPRoutesTest(unittest.IsolatedAsyncioTestCase):
     async def test_round_trips_feedback_through_fastapi_routes(self) -> None:
         app = FastAPI()
-        engine_client = FakeAsyncEngineClient()
+        engine_client = VerificationEngineClient()
         app.state.engine_client = engine_client
         self.assertTrue(install_vllm_http_routes(app))
         self.assertFalse(install_vllm_http_routes(app))
@@ -330,7 +366,7 @@ class VLLMHTTPRoutesTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         status = await feedback.status()
-        await feedback.clear("main/one")
+        outcome = await feedback.clear("main/one")
 
         self.assertTrue(receipt.registered)
         self.assertEqual(status["worker_results"][0]["active_requests"], 1)
@@ -338,6 +374,7 @@ class VLLMHTTPRoutesTest(unittest.IsolatedAsyncioTestCase):
             engine_client.calls[-1][2],
             ("main/one",),
         )
+        self.assertEqual(outcome.accepted_tokens if outcome else None, 1)
         await client.aclose()
 
     async def test_round_trips_a_tokenized_bundle_route(self) -> None:

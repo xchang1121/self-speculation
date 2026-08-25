@@ -139,6 +139,21 @@ each proposer step it:
 7. after target divergence, considers the next ranked candidate at a later
    sequence position.
 
+Every offer also becomes one pending verification step. An engine with a
+native acceptance callback resolves it directly; otherwise the next target
+sequence resolves it by longest common prefix. The request-scoped outcome
+records candidate index/ID and drafted, accepted, and rejected token counts.
+Cleanup never invents feedback: a final pending offer is returned as
+`unresolved_proposals` and `unresolved_draft_tokens`. Consequently,
+`DraftReceipt.accepted_token_count` from registration must not be used as an
+online acceptance signal.
+
+`DraftFeedback.clear()` returns the optional `DraftVerificationOutcome` after
+atomically removing request state. HTTP and vLLM RPC bridges preserve the same
+shape under `verification`; aggregate field names intentionally match vLLM's
+per-request speculative-decoding metrics, while `steps` adds the candidate
+identity required for source-aware calibration.
+
 Registration, proposal, incremental bundle replacement, cleanup, and metrics
 are protected by one re-entrant lock. Different requests never share proposal
 state. Replacement preserves fired candidate identities and the last offered

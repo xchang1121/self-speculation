@@ -212,7 +212,11 @@ class TransformersEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(streamed_ids, generated)
         self.assertEqual(store.snapshot().injections, 1)
         self.assertLess(assisted_calls, baseline_calls)
-        await engine.clear("transformers-d3")
+        outcome = await engine.clear("transformers-d3")
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.proposed_tokens if outcome else None, 2)
+        self.assertEqual(outcome.accepted_tokens if outcome else None, 2)
+        self.assertEqual(outcome.unresolved_proposals if outcome else None, 0)
         self.assertEqual(store.snapshot().active_requests, 0)
 
 

@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .base import DraftBundle, DraftReceipt, DraftRequest
+from .base import (
+    DraftBundle,
+    DraftReceipt,
+    DraftRequest,
+    DraftVerificationOutcome,
+    DraftVerificationStep,
+)
 
 
 BoundaryTokenizer = Callable[[str], Sequence[int]]
@@ -53,6 +59,11 @@ class DraftStoreSnapshot:
     bundle_registrations: int = 0
     registered_candidates: int = 0
     fallback_injections: int = 0
+    resolved_proposals: int = 0
+    unresolved_proposals: int = 0
+    unresolved_draft_tokens: int = 0
+    accepted_draft_tokens: int = 0
+    rejected_draft_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -65,11 +76,21 @@ class _CandidateDraft:
     fired: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingProposal:
+    token_ids: tuple[int, ...]
+    sequence_length: int
+    candidate_index: int
+    candidate_id: str | None
+
+
 @dataclass(slots=True)
 class _RequestDraft:
     candidates: tuple[_CandidateDraft, ...]
     bundled: bool
     last_offer_sequence_length: int | None = None
+    pending: _PendingProposal | None = None
+    verification_steps: list[DraftVerificationStep] = field(default_factory=list)
 
 
 class BoundaryDraftStore:
@@ -105,6 +126,32 @@ class BoundaryDraftStore:
         self._bundle_registrations = 0
         self._registered_candidates = 0
         self._fallback_injections = 0
+        self._resolved_proposals = 0
+        self._unresolved_proposals = 0
+        self._unresolved_draft_tokens = 0
+        self._accepted_draft_tokens = 0
+        self._rejected_draft_tokens = 0
+
+    @staticmethod
+    def _request(
+        candidates: tuple[_CandidateDraft, ...],
+        *,
+        bundled: bool,
+        previous: _RequestDraft | None = None,
+    ) -> _RequestDraft:
+        return _RequestDraft(
+            candidates=candidates,
+            bundled=bundled,
+            last_offer_sequence_length=(
+                previous.last_offer_sequence_length
+                if previous is not None
+                else None
+            ),
+            pending=previous.pending if previous is not None else None,
+            verification_steps=(
+                list(previous.verification_steps) if previous is not None else []
+            ),
+        )
 
     def _boundary_tokens(self, draft: DraftRequest) -> tuple[int, ...]:
         if draft.boundary is None:
@@ -154,10 +201,12 @@ class BoundaryDraftStore:
     def register(self, draft: DraftRequest) -> DraftReceipt:
         candidate = self._candidate(draft)
         with self._lock:
-            replaced = draft.request_id in self._requests
-            self._requests[draft.request_id] = _RequestDraft(
-                candidates=(candidate,),
+            previous = self._requests.get(draft.request_id)
+            replaced = previous is not None
+            self._requests[draft.request_id] = self._request(
+                (candidate,),
                 bundled=False,
+                previous=previous,
             )
             self._registrations += 1
             self._registered_candidates += 1
@@ -194,14 +243,10 @@ class BoundaryDraftStore:
                     old = previous_candidates.get(candidate.identity)
                     if old is not None:
                         candidate.fired = old.fired
-            self._requests[bundle.request_id] = _RequestDraft(
-                candidates=tuple(candidates),
+            self._requests[bundle.request_id] = self._request(
+                tuple(candidates),
                 bundled=True,
-                last_offer_sequence_length=(
-                    previous.last_offer_sequence_length
-                    if previous is not None and previous.bundled
-                    else None
-                ),
+                previous=previous,
             )
             self._registrations += 1
             self._bundle_registrations += 1
@@ -234,7 +279,14 @@ class BoundaryDraftStore:
 
         with self._lock:
             state = self._requests.get(request_id)
-            if state is None or state.last_offer_sequence_length == sequence_length:
+            if state is None:
+                return None
+            self._resolve_from_sequence(
+                state,
+                sequence_token_ids,
+                sequence_length,
+            )
+            if state.last_offer_sequence_length == sequence_length:
                 return None
             for candidate_index, candidate in enumerate(state.candidates):
                 if candidate.fired:
@@ -272,6 +324,12 @@ class BoundaryDraftStore:
                 proposed = remaining[:limit]
                 candidate.fired = True
                 state.last_offer_sequence_length = sequence_length
+                state.pending = _PendingProposal(
+                    token_ids=tuple(proposed),
+                    sequence_length=sequence_length,
+                    candidate_index=candidate_index,
+                    candidate_id=candidate.candidate_id,
+                )
                 self._injections += 1
                 self._proposed_tokens += len(proposed)
                 if candidate_index > 0:
@@ -288,13 +346,112 @@ class BoundaryDraftStore:
                 )
             return None
 
-    def clear(self, request_id: str) -> bool:
+    def _resolve_pending(
+        self,
+        state: _RequestDraft,
+        accepted_tokens: int,
+    ) -> bool:
+        pending = state.pending
+        if pending is None:
+            return False
+        if accepted_tokens < 0 or accepted_tokens > len(pending.token_ids):
+            raise ValueError("accepted_tokens is outside the pending proposal")
+        step = DraftVerificationStep(
+            drafted_tokens=len(pending.token_ids),
+            accepted_tokens=accepted_tokens,
+            candidate_index=pending.candidate_index,
+            candidate_id=pending.candidate_id,
+        )
+        state.verification_steps.append(step)
+        state.pending = None
+        self._resolved_proposals += 1
+        self._accepted_draft_tokens += step.accepted_tokens
+        self._rejected_draft_tokens += step.rejected_tokens
+        return True
+
+    def _resolve_from_sequence(
+        self,
+        state: _RequestDraft,
+        sequence_token_ids: Sequence[int],
+        sequence_length: int,
+    ) -> None:
+        pending = state.pending
+        if pending is None or sequence_length <= pending.sequence_length:
+            return
+        emitted = tuple(
+            int(token)
+            for token in sequence_token_ids[
+                pending.sequence_length : sequence_length
+            ]
+        )
+        self._resolve_pending(
+            state,
+            _common_prefix_length(pending.token_ids, emitted),
+        )
+
+    def observe_acceptance(
+        self,
+        request_id: str,
+        accepted_tokens: int,
+    ) -> bool:
+        """Resolve the most recent proposal from an engine verification callback."""
+
         with self._lock:
-            return self._requests.pop(request_id, None) is not None
+            state = self._requests.get(request_id)
+            return (
+                self._resolve_pending(state, int(accepted_tokens))
+                if state is not None
+                else False
+            )
+
+    @staticmethod
+    def _outcome(
+        request_id: str,
+        state: _RequestDraft,
+    ) -> DraftVerificationOutcome:
+        pending = state.pending
+        return DraftVerificationOutcome(
+            request_id=request_id,
+            steps=tuple(state.verification_steps),
+            unresolved_proposals=1 if pending is not None else 0,
+            unresolved_draft_tokens=(
+                len(pending.token_ids) if pending is not None else 0
+            ),
+        )
+
+    def outcome(self, request_id: str) -> DraftVerificationOutcome | None:
+        with self._lock:
+            state = self._requests.get(request_id)
+            return (
+                self._outcome(request_id, state)
+                if state is not None
+                else None
+            )
+
+    def take_outcome(self, request_id: str) -> DraftVerificationOutcome | None:
+        with self._lock:
+            state = self._requests.pop(request_id, None)
+            if state is None:
+                return None
+            outcome = self._outcome(request_id, state)
+            self._unresolved_proposals += outcome.unresolved_proposals
+            self._unresolved_draft_tokens += outcome.unresolved_draft_tokens
+            return outcome
+
+    def clear(self, request_id: str) -> bool:
+        return self.take_outcome(request_id) is not None
 
     def clear_all(self) -> int:
         with self._lock:
             count = len(self._requests)
+            self._unresolved_proposals += sum(
+                state.pending is not None for state in self._requests.values()
+            )
+            self._unresolved_draft_tokens += sum(
+                len(state.pending.token_ids)
+                for state in self._requests.values()
+                if state.pending is not None
+            )
             self._requests.clear()
             return count
 
@@ -310,6 +467,11 @@ class BoundaryDraftStore:
                 bundle_registrations=self._bundle_registrations,
                 registered_candidates=self._registered_candidates,
                 fallback_injections=self._fallback_injections,
+                resolved_proposals=self._resolved_proposals,
+                unresolved_proposals=self._unresolved_proposals,
+                unresolved_draft_tokens=self._unresolved_draft_tokens,
+                accepted_draft_tokens=self._accepted_draft_tokens,
+                rejected_draft_tokens=self._rejected_draft_tokens,
             )
 
 
@@ -326,5 +488,7 @@ class BoundaryDraftFeedback:
     async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
         return self.store.register_bundle(bundle)
 
-    async def clear(self, request_id: str) -> None:
-        self.store.clear(request_id)
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
+        return self.store.take_outcome(request_id)

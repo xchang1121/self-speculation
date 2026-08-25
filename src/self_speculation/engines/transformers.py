@@ -10,7 +10,12 @@ import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
-from ..drafts import BoundaryDraftStore, DraftReceipt, DraftRequest
+from ..drafts import (
+    BoundaryDraftStore,
+    DraftReceipt,
+    DraftRequest,
+    DraftVerificationOutcome,
+)
 from ..models import EngineCapabilities, InferenceRequest, StreamChunk
 
 
@@ -128,6 +133,8 @@ class TransformersBoundaryCandidateGenerator:
         del input_ids, scores
         accepted = min(int(num_matches), self._last_candidate_length)
         self.accepted_tokens += max(0, accepted)
+        if self._last_candidate_length:
+            self.store.observe_acceptance(self.request_id, max(0, accepted))
         self._last_candidate_length = 0
 
 
@@ -387,9 +394,12 @@ class TransformersEngine:
             raise RuntimeError("TransformersEngine has no configured draft_store")
         return self.draft_store.register(draft)
 
-    async def clear(self, request_id: str) -> None:
-        if self.draft_store is not None:
-            self.draft_store.clear(request_id)
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
+        if self.draft_store is None:
+            return None
+        return self.draft_store.take_outcome(request_id)
 
     def _request_generation_kwargs(
         self,

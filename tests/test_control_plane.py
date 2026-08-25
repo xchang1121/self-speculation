@@ -8,6 +8,8 @@ import httpx
 from fastapi import FastAPI
 
 from self_speculation import (
+    BoundaryDraftFeedback,
+    BoundaryDraftStore,
     CandidateBundleBuilder,
     ControlRequestClosedError,
     DraftBundle,
@@ -336,6 +338,41 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(feedback.cleared, ["actor-request"])
         await client.aclose()
 
+    async def test_clear_returns_target_verification_telemetry(self) -> None:
+        store = BoundaryDraftStore(max_draft_tokens=28)
+        plane = SelfSpeculationControlPlane(
+            BoundaryDraftFeedback(store),
+            CandidateBundleBuilder(tokenizer=encode),
+        )
+        app = FastAPI()
+        install_self_speculation_routes(app, plane)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://control",
+        ) as client:
+            payload = {**candidate_payload(), "prompt_token_count": 0}
+            submitted = await client.post(
+                "/self-speculation/candidates",
+                json=payload,
+            )
+            self.assertEqual(submitted.status_code, 200)
+            proposal = store.offer("actor-request", encode("<tool_call>"))
+            self.assertIsNotNone(proposal)
+            assert proposal is not None
+            accepted = min(5, len(proposal.token_ids))
+            store.observe_acceptance("actor-request", accepted)
+
+            cleared = await client.post(
+                "/self-speculation/clear",
+                json={"request_id": "actor-request"},
+            )
+
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(
+            cleared.json()["verification"],
+            expect_verification(len(proposal.token_ids), accepted, "external"),
+        )
+
 
 def candidate_payload():
     return {
@@ -378,6 +415,32 @@ def fork_payload():
             "temperature": 0,
             "require_logprobs": True,
         },
+    }
+
+
+def expect_verification(
+    drafted: int,
+    accepted: int,
+    candidate_id: str,
+) -> dict:
+    return {
+        "num_spec_steps": 1,
+        "num_draft_tokens": drafted,
+        "num_accepted_draft_tokens": accepted,
+        "num_rejected_draft_tokens": drafted - accepted,
+        "draft_acceptance_rate": accepted / drafted,
+        "mean_acceptance_length": 1 + accepted,
+        "per_step_drafted": [drafted],
+        "per_step_accepted": [accepted],
+        "steps": [{
+            "candidate_index": 0,
+            "candidate_id": candidate_id,
+            "drafted_tokens": drafted,
+            "accepted_tokens": accepted,
+            "rejected_tokens": drafted - accepted,
+        }],
+        "unresolved_proposals": 0,
+        "unresolved_draft_tokens": 0,
     }
 
 

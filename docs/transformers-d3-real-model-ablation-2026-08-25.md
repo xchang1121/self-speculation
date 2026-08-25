@@ -32,6 +32,15 @@ All eight registered drafts (one warm-up and seven measured runs) were injected;
 the store proposed 224 tokens with zero divergent/stale drafts and returned to
 zero active requests after cleanup.
 
+The reproducible script now also consumes the native Transformers
+`num_matches` callback and fails unless every exact-replay proposal is resolved
+and fully accepted. Its JSON report includes the measured-request totals under
+`verification`, separating target acceptance from registration receipts. A
+seven-pair rerun on 2026-08-26 observed 196/196 accepted measured draft tokens,
+zero rejected tokens, and zero unresolved proposals; the store total including
+warm-up was 224/224. Output token IDs remained identical and target forward
+calls remained 32 versus 4.
+
 ## Decision and boundary
 
 Accepted as a real-engine integration gate. It confirms that the

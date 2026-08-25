@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .base import DraftReceipt, DraftRequest
+from .base import DraftReceipt, DraftRequest, DraftVerificationOutcome
 
 
 SubmitResult = DraftReceipt | Mapping[str, Any] | bool | None
@@ -99,6 +99,27 @@ class CallableDraftFeedback:
         result = await _invoke(self.submitter, draft)
         return normalize_draft_receipt(result, draft)
 
-    async def clear(self, request_id: str) -> None:
-        if self.clearer is not None:
-            await _invoke(self.clearer, request_id)
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
+        if self.clearer is None:
+            return None
+        result = await _invoke(self.clearer, request_id)
+        if result is None or isinstance(result, bool):
+            return None
+        if isinstance(result, DraftVerificationOutcome):
+            if result.request_id != request_id:
+                raise ValueError(
+                    "verification outcome request_id does not match the request"
+                )
+            return result
+        if isinstance(result, Mapping):
+            verification = result.get("verification", result)
+            if isinstance(verification, Mapping):
+                return DraftVerificationOutcome.from_mapping(
+                    request_id,
+                    verification,
+                )
+        raise TypeError(
+            "draft clearer must return DraftVerificationOutcome, mapping, bool, or None"
+        )

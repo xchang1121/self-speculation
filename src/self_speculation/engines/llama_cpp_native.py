@@ -11,7 +11,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ..drafts import BoundaryDraftStore, DraftReceipt, DraftRequest
+from ..drafts import (
+    BoundaryDraftStore,
+    DraftReceipt,
+    DraftRequest,
+    DraftVerificationOutcome,
+)
 from ..models import (
     EngineCapabilities,
     InferenceRequest,
@@ -266,9 +271,12 @@ class LlamaCppPythonEngine:
             raise RuntimeError("LlamaCppPythonEngine has no configured draft model")
         return self.draft_model.store.register(draft)
 
-    async def clear(self, request_id: str) -> None:
-        if self.draft_model is not None:
-            self.draft_model.store.clear(request_id)
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
+        if self.draft_model is None:
+            return None
+        return self.draft_model.store.take_outcome(request_id)
 
     def _options(self, request: InferenceRequest) -> dict[str, Any]:
         nested = request.extra.get("generate_kwargs") or {}

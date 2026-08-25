@@ -19,6 +19,7 @@ from .drafts import (
     DraftReceipt,
     DraftRequest,
     DraftTokenizer,
+    DraftVerificationOutcome,
     ToolCallDraftBuilder,
     default_draft_boundary,
     format_tool_call_draft,
@@ -392,7 +393,9 @@ class SelfSpeculationControlPlane:
             receipt = await self.feedback.submit_bundle(combined)
             return _receipt_with_bundle_observation(receipt, combined)
 
-    async def clear(self, request_id: str) -> None:
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
         request_id = request_id.strip()
         if not request_id:
             raise ValueError("request_id must not be empty")
@@ -406,9 +409,8 @@ class SelfSpeculationControlPlane:
                 del self._closed_requests[next(iter(self._closed_requests))]
         if state is not None:
             async with state.lock:
-                await self.feedback.clear(request_id)
-        else:
-            await self.feedback.clear(request_id)
+                return await self.feedback.clear(request_id)
+        return await self.feedback.clear(request_id)
 
     async def _state_for(self, request_id: str) -> _ControlState:
         async with self._states_lock:
@@ -504,12 +506,20 @@ def install_self_speculation_routes(
     async def clear(payload: dict[str, Any]) -> dict[str, Any]:
         request_id = str(payload.get("request_id") or "")
         try:
-            await control_plane.clear(request_id)
+            verification = await control_plane.clear(request_id)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except Exception as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
-        return {"status": "cleared", "request_id": request_id}
+        return {
+            "status": "cleared",
+            "request_id": request_id,
+            **(
+                {"verification": verification.to_mapping()}
+                if verification is not None
+                else {}
+            ),
+        }
 
     add_api_route(prefix + "/candidates", candidates, methods=["POST"])
     add_api_route(prefix + "/fork", fork, methods=["POST"])

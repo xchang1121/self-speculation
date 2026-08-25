@@ -9,6 +9,8 @@ from .base import (
     DraftReceipt,
     DraftRequest,
     DraftTokenizer,
+    DraftVerificationOutcome,
+    DraftVerificationStep,
     ToolCallDraftBuilder,
 )
 from .callable import (
@@ -44,6 +46,8 @@ __all__ = [
     "DraftRequest",
     "DraftSubmitter",
     "DraftTokenizer",
+    "DraftVerificationOutcome",
+    "DraftVerificationStep",
     "DraftStoreSnapshot",
     "HTTPDraftFeedback",
     "SporkHTTPDraftFeedback",

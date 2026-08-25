@@ -116,6 +116,55 @@ class BoundaryDraftStoreTest(unittest.TestCase):
         self.assertEqual(snapshot.bundle_registrations, 1)
         self.assertEqual(snapshot.registered_candidates, 2)
         self.assertEqual(snapshot.fallback_injections, 1)
+        outcome = store.outcome("bundle")
+        assert outcome is not None
+        self.assertEqual(outcome.proposed_tokens, 2)
+        self.assertEqual(outcome.accepted_tokens, 1)
+        self.assertEqual(outcome.rejected_tokens, 1)
+        self.assertEqual(outcome.unresolved_proposals, 1)
+        self.assertEqual(outcome.unresolved_draft_tokens, 1)
+
+    def test_records_direct_engine_acceptance_with_candidate_identity(self) -> None:
+        store = BoundaryDraftStore(max_draft_tokens=8)
+        store.register(
+            DraftRequest(
+                request_id="observed",
+                token_ids=(20, 21, 22),
+                boundary=DraftBoundary(token_ids=(10,)),
+                prompt_token_count=2,
+                metadata={"candidate_id": "drafter-a"},
+            )
+        )
+        proposal = store.offer("observed", [90, 91, 10])
+
+        self.assertEqual(proposal.token_ids if proposal else (), (20, 21, 22))
+        self.assertTrue(store.observe_acceptance("observed", 2))
+        self.assertFalse(store.observe_acceptance("observed", 0))
+        outcome = store.take_outcome("observed")
+        assert outcome is not None
+        self.assertEqual(outcome.to_mapping(), {
+            "num_spec_steps": 1,
+            "num_draft_tokens": 3,
+            "num_accepted_draft_tokens": 2,
+            "num_rejected_draft_tokens": 1,
+            "draft_acceptance_rate": 2 / 3,
+            "mean_acceptance_length": 3.0,
+            "per_step_drafted": [3],
+            "per_step_accepted": [2],
+            "steps": [{
+                "candidate_index": 0,
+                "candidate_id": "drafter-a",
+                "drafted_tokens": 3,
+                "accepted_tokens": 2,
+                "rejected_tokens": 1,
+            }],
+            "unresolved_proposals": 0,
+            "unresolved_draft_tokens": 0,
+        })
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot.resolved_proposals, 1)
+        self.assertEqual(snapshot.accepted_draft_tokens, 2)
+        self.assertEqual(snapshot.rejected_draft_tokens, 1)
 
     def test_bundle_replacement_preserves_already_offered_candidates(self) -> None:
         store = BoundaryDraftStore(max_draft_tokens=8)
@@ -188,7 +237,9 @@ class BoundaryDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         feedback = BoundaryDraftFeedback(store)
         receipt = await feedback.submit(draft("async"))
         self.assertTrue(receipt.registered)
-        await feedback.clear("async")
+        outcome = await feedback.clear("async")
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.unresolved_proposals if outcome else None, 0)
         self.assertEqual(store.snapshot().active_requests, 0)
 
     async def test_submits_an_ordered_bundle(self) -> None:

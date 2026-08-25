@@ -20,6 +20,7 @@ from self_speculation import (
     BoundaryDraftStore,
     DraftBoundary,
     DraftRequest,
+    DraftVerificationOutcome,
     InferenceRequest,
     TransformersEngine,
 )
@@ -78,6 +79,27 @@ def _run_summary(measurement: RunMeasurement) -> dict[str, float | int]:
     }
 
 
+def _verification_summary(
+    outcomes: list[DraftVerificationOutcome],
+) -> dict[str, float | int]:
+    proposed = sum(outcome.proposed_tokens for outcome in outcomes)
+    accepted = sum(outcome.accepted_tokens for outcome in outcomes)
+    return {
+        "requests": len(outcomes),
+        "num_spec_steps": sum(len(outcome.steps) for outcome in outcomes),
+        "num_draft_tokens": proposed,
+        "num_accepted_draft_tokens": accepted,
+        "num_rejected_draft_tokens": proposed - accepted,
+        "draft_acceptance_rate": accepted / proposed if proposed else 0.0,
+        "unresolved_proposals": sum(
+            outcome.unresolved_proposals for outcome in outcomes
+        ),
+        "unresolved_draft_tokens": sum(
+            outcome.unresolved_draft_tokens for outcome in outcomes
+        ),
+    }
+
+
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -125,7 +147,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         max_draft_tokens=args.max_draft_tokens,
     )
 
-    async def assisted(run_index: int, *, warmup: bool = False) -> RunMeasurement:
+    async def assisted(
+        run_index: int,
+        *,
+        warmup: bool = False,
+    ) -> tuple[RunMeasurement, DraftVerificationOutcome]:
         request_id = f"transformers-d3-{'warmup' if warmup else run_index}"
         store.register(
             DraftRequest(
@@ -144,8 +170,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 max_tokens=args.max_new_tokens,
             ),
         )
-        store.clear(request_id)
-        return result
+        outcome = await assisted_engine.clear(request_id)
+        if outcome is None:
+            raise RuntimeError("assisted request produced no verification outcome")
+        if outcome.unresolved_proposals:
+            raise RuntimeError("assisted request left a draft proposal unresolved")
+        if outcome.proposed_tokens != len(draft_tokens):
+            raise RuntimeError("assisted request did not verify the complete draft")
+        return result, outcome
 
     # Warm both generation modes before collecting wall-clock samples.
     await _measure(
@@ -153,25 +185,31 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         model,
         InferenceRequest(prompt=args.prompt, max_tokens=args.max_new_tokens),
     )
-    warm_assisted = await assisted(-1, warmup=True)
+    warm_assisted, warm_verification = await assisted(-1, warmup=True)
     if warm_assisted.output_token_ids != reference.output_token_ids:
         raise RuntimeError("assisted warm-up changed target output")
+    if warm_verification.accepted_tokens != len(draft_tokens):
+        raise RuntimeError("exact assisted warm-up draft was not fully accepted")
 
     baselines: list[RunMeasurement] = []
     assisted_runs: list[RunMeasurement] = []
+    verification_outcomes: list[DraftVerificationOutcome] = []
     for run_index in range(args.repeats):
         baseline = await _measure(
             baseline_engine,
             model,
             InferenceRequest(prompt=args.prompt, max_tokens=args.max_new_tokens),
         )
-        accelerated = await assisted(run_index)
+        accelerated, verification = await assisted(run_index)
         if baseline.output_token_ids != reference.output_token_ids:
             raise RuntimeError("baseline generation was not deterministic")
         if accelerated.output_token_ids != reference.output_token_ids:
             raise RuntimeError("assisted decoding changed target output")
+        if verification.accepted_tokens != len(draft_tokens):
+            raise RuntimeError("exact assisted draft was not fully accepted")
         baselines.append(baseline)
         assisted_runs.append(accelerated)
+        verification_outcomes.append(verification)
 
     baseline_ms = _median([item.elapsed_ms for item in baselines])
     assisted_ms = _median([item.elapsed_ms for item in assisted_runs])
@@ -205,6 +243,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             else 0.0
         ),
         "wall_time_speedup": baseline_ms / assisted_ms if assisted_ms else 0.0,
+        "verification": _verification_summary(verification_outcomes),
         "store": asdict(store.snapshot()),
     }
 

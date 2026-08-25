@@ -57,6 +57,29 @@ class CallableDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TypeError, "must return"):
             await CallableDraftFeedback(lambda item: object()).submit(draft)
 
+    async def test_normalizes_clear_verification_metrics(self) -> None:
+        feedback = CallableDraftFeedback(
+            lambda draft: True,
+            lambda request_id: {
+                "request_id": request_id,
+                "verification": {
+                    "num_spec_steps": 2,
+                    "num_draft_tokens": 5,
+                    "num_accepted_draft_tokens": 3,
+                    "num_rejected_draft_tokens": 2,
+                    "per_step_drafted": [3, 2],
+                    "per_step_accepted": [2, 1],
+                },
+            },
+        )
+
+        outcome = await feedback.clear("verified")
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.proposed_tokens if outcome else None, 5)
+        self.assertEqual(outcome.accepted_tokens if outcome else None, 3)
+        self.assertEqual(outcome.rejected_tokens if outcome else None, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

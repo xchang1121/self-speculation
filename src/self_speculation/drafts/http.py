@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
-from .base import DraftReceipt, DraftRequest
+from .base import DraftReceipt, DraftRequest, DraftVerificationOutcome
 from .callable import normalize_draft_receipt
 
 if TYPE_CHECKING:
@@ -139,7 +139,9 @@ class HTTPDraftFeedback:
         payload = self._response_payload(response)
         return normalize_draft_receipt(payload, draft)
 
-    async def clear(self, request_id: str) -> None:
+    async def clear(
+        self, request_id: str
+    ) -> DraftVerificationOutcome | None:
         payload = self.clear_payload(request_id)
         request_kwargs: dict[str, Any] = {
             "headers": self._headers(),
@@ -153,7 +155,16 @@ class HTTPDraftFeedback:
             **request_kwargs,
         )
         response.raise_for_status()
-        self._response_payload(response)
+        response_payload = self._response_payload(response)
+        if not isinstance(response_payload, Mapping):
+            return None
+        verification = response_payload.get("verification")
+        if not isinstance(verification, Mapping):
+            return None
+        return DraftVerificationOutcome.from_mapping(
+            request_id,
+            verification,
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:

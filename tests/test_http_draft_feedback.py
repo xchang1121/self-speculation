@@ -91,6 +91,44 @@ class HTTPDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt.draft_token_count, 3)
         await client.aclose()
 
+    async def test_returns_request_scoped_verification_on_clear(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "cleared",
+                        "verification": {
+                            "num_spec_steps": 1,
+                            "num_draft_tokens": 3,
+                            "num_accepted_draft_tokens": 2,
+                            "num_rejected_draft_tokens": 1,
+                            "steps": [
+                                {
+                                    "candidate_index": 1,
+                                    "candidate_id": "fallback",
+                                    "drafted_tokens": 3,
+                                    "accepted_tokens": 2,
+                                }
+                            ],
+                        },
+                    },
+                )
+            return httpx.Response(200, json={"registered": True})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        feedback = HTTPDraftFeedback("http://engine", client=client)
+
+        outcome = await feedback.clear("main")
+
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.accepted_tokens if outcome else None, 2)
+        self.assertEqual(
+            outcome.steps[0].candidate_id if outcome else None,
+            "fallback",
+        )
+        await client.aclose()
+
     async def test_rejects_missing_tokens_and_sidecar_errors(self) -> None:
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(

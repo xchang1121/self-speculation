@@ -73,6 +73,48 @@ engine client, then registers one ordered bundle. Registration waits for the
 matching main request to become active for a bounded interval, covering the
 normal race between the OpenAI request and its control update.
 
+`POST /self-speculation/clear` returns observed per-request verification when
+the proposer saw at least one registered request:
+
+```json
+{
+  "status": "cleared",
+  "request_id": "actor-request-id",
+  "verification": {
+    "num_spec_steps": 2,
+    "num_draft_tokens": 12,
+    "num_accepted_draft_tokens": 9,
+    "num_rejected_draft_tokens": 3,
+    "draft_acceptance_rate": 0.75,
+    "mean_acceptance_length": 5.5,
+    "steps": [
+      {
+        "candidate_index": 0,
+        "candidate_id": "drafter-0",
+        "drafted_tokens": 8,
+        "accepted_tokens": 7,
+        "rejected_tokens": 1
+      },
+      {
+        "candidate_index": 1,
+        "candidate_id": "pattern-0",
+        "drafted_tokens": 4,
+        "accepted_tokens": 2,
+        "rejected_tokens": 2
+      }
+    ],
+    "unresolved_proposals": 0,
+    "unresolved_draft_tokens": 0
+  }
+}
+```
+
+The worker that owns the custom proposer supplies this object; pipeline workers
+without a proposer remain `skipped`. Sequence reconciliation observes a step
+when vLLM next invokes the proposer. If the request ends immediately after an
+offer, cleanup reports that last offer as unresolved instead of treating it as
+a rejection. This telemetry changes no candidate ordering or proposal length.
+
 ## Agent sidecar for unified candidates and self-fork
 
 The vLLM endpoint plugin can accept external candidates directly, but it does

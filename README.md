@@ -192,6 +192,18 @@ suffix. A ranked bundle falls through to the next distinct action after target
 rejection; each candidate fires at most once. Incremental bundle replacement
 preserves already-fired identities. The target engine still verifies every
 proposed token, so disagreement falls back to ordinary target-model decoding.
+Each verifier step is retained with its candidate ID and proposed, accepted,
+and rejected token counts. Clearing a request returns this observed outcome;
+the portable HTTP adapters expose it as an optional `verification` object.
+An offer that cannot be reconciled before cleanup is reported separately as
+unresolved rather than being guessed as accepted or rejected.
+
+`DraftReceipt.accepted_token_count` belongs to the registration handshake and
+is not necessarily target-model acceptance. Use the clear-time verification
+outcome for policy tuning. Transformers reports its native `num_matches`
+callback directly; boundary-only integrations reconcile an offer from the next
+target sequence and keep a final unseen offer unresolved.
+
 The candidate builder, boundary store, snapshot fork, and Transformers adapter
 default to an action-draft cap of 28 tokens, the smallest saturation point in
 the [recorded D3 length ablation](docs/d3-draft-length-ablation-2026-08-25.md);
@@ -219,7 +231,7 @@ identical complete drafts while merging provenance, and submits one ordered
 | --- | --- |
 | `POST /self-speculation/candidates` | replace the current external candidate set |
 | `POST /self-speculation/fork` | run one self-fork from a captured Actor snapshot |
-| `POST /self-speculation/clear` | fence late updates and clear verifier state |
+| `POST /self-speculation/clear` | fence late updates, return observed verification, and clear verifier state |
 
 All three operations use the same high-entropy Actor request ID. Candidate and
 fork work is serialized only within that ID; unrelated requests remain

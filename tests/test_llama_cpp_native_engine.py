@@ -100,7 +100,10 @@ class LlamaCppPythonEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llama.proposed, (10, 11))
         self.assertEqual(store.snapshot().injections, 1)
         self.assertIsNone(draft_model.active_request_id)
-        await engine.clear("llama-main")
+        outcome = await engine.clear("llama-main")
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.unresolved_proposals if outcome else None, 1)
+        self.assertEqual(outcome.unresolved_draft_tokens if outcome else None, 2)
         self.assertEqual(store.snapshot().active_requests, 0)
 
     async def test_normalizes_native_chat_tool_deltas(self) -> None:
