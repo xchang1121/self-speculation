@@ -44,6 +44,13 @@ class DraftLengthResult:
     target_step_reduction: float
 
 
+@dataclass(frozen=True, slots=True)
+class DraftOpportunity:
+    sequence: int
+    actual_tokens: tuple[int, ...]
+    candidate_tokens: tuple[tuple[int, ...], ...]
+
+
 def _context_key(messages: Any) -> str:
     return json.dumps(
         messages or [],
@@ -206,15 +213,13 @@ def _simulate(
     return target_steps, proposals, proposed_tokens, accepted_tokens
 
 
-def analyze(
+def build_opportunities(
     exchanges: Sequence[ParsedExchange],
     *,
     actor_model: str,
     drafter_model: str,
     tokenizer: Any,
-    limits: Sequence[int],
-    orderings: Sequence[str] = ("completion",),
-) -> tuple[DraftLengthResult, ...]:
+) -> tuple[DraftOpportunity, ...]:
     drafters: dict[str, list[ParsedExchange]] = defaultdict(list)
     for exchange in exchanges:
         if exchange.model == drafter_model:
@@ -222,7 +227,7 @@ def analyze(
     for values in drafters.values():
         values.sort(key=lambda item: (item.duration_ms, item.sequence))
 
-    opportunities: list[tuple[tuple[int, ...], tuple[tuple[int, ...], ...]]] = []
+    opportunities = []
     for actor in exchanges:
         if actor.model != actor_model:
             continue
@@ -250,19 +255,54 @@ def analyze(
                     format_tool_call_draft((call,)), add_special_tokens=False
                 )
             )
-            opportunities.append((actual, tuple(distinct)))
+            opportunities.append(
+                DraftOpportunity(
+                    sequence=actor.sequence,
+                    actual_tokens=actual,
+                    candidate_tokens=tuple(distinct),
+                )
+            )
+    return tuple(opportunities)
+
+
+def analyze(
+    exchanges: Sequence[ParsedExchange],
+    *,
+    actor_model: str,
+    drafter_model: str,
+    tokenizer: Any,
+    limits: Sequence[int],
+    orderings: Sequence[str] = ("completion",),
+) -> tuple[DraftLengthResult, ...]:
+    opportunities = build_opportunities(
+        exchanges,
+        actor_model=actor_model,
+        drafter_model=drafter_model,
+        tokenizer=tokenizer,
+    )
 
     results = []
     for ordering in orderings:
         for limit in limits:
-            actor_tokens = sum(len(actual) for actual, _ in opportunities)
+            actor_tokens = sum(
+                len(opportunity.actual_tokens) for opportunity in opportunities
+            )
             candidate_count = sum(
-                len(candidates) for _, candidates in opportunities
+                len(opportunity.candidate_tokens)
+                for opportunity in opportunities
             )
             proposals = proposed = accepted = target_steps = 0
-            for actual, candidates in opportunities:
-                ranked = _order_candidates(candidates, limit=limit, ordering=ordering)
-                steps, proposal_count, offered, matched = _simulate(actual, ranked, limit)
+            for opportunity in opportunities:
+                ranked = _order_candidates(
+                    opportunity.candidate_tokens,
+                    limit=limit,
+                    ordering=ordering,
+                )
+                steps, proposal_count, offered, matched = _simulate(
+                    opportunity.actual_tokens,
+                    ranked,
+                    limit,
+                )
                 target_steps += steps
                 proposals += proposal_count
                 proposed += offered

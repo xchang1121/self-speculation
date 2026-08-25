@@ -61,11 +61,13 @@ Recent approaches reinforce that a real policy needs real signals:
   [per-request acceptance metrics](https://docs.vllm.ai/en/latest/features/speculative_decoding/acceptance_metrics/)
   in the final usage chunk.
 
-The next legitimate dynamic implementation should preserve those vLLM metrics
-through the provider bridge (or expose an equivalent engine callback), then tune
-K against measured verifier wall time and batch size. Until that feedback exists,
-the fixed K=28 cap is the evidence-backed improvement and dynamic K remains
-deferred rather than simulated in production.
+The request-scoped feedback bridge now preserves equivalent real acceptance
+metrics. A follow-up [causal dynamic-cap ablation](d3-dynamic-cap-ablation-2026-08-26.md)
+tested Transformers' documented persistent `+2/-1` heuristic. It changed no
+proposal, acceptance, rejection, or target-step metric from the fixed K=28
+starting point and was rejected for production. Dynamic K therefore remains
+deferred until token confidence, verifier wall time/batch size, or materially
+larger online evidence can select a policy that beats the fixed cap.
 
 Reproduce one tape with:
 

@@ -214,6 +214,11 @@ also records a rejected target-token prefix-consensus tie-break: it increased
 rejected verifier work without saving an additional target step, so production
 candidate ordering remains unchanged.
 
+The [causal dynamic-cap ablation](docs/d3-dynamic-cap-ablation-2026-08-26.md)
+also rejects a request-level version of Transformers' persistent `+2/-1`
+lookahead heuristic: from K=28 it changed no verifier-work or saved-step metric,
+so production retains the fixed evidence-backed cap.
+
 The [real-Transformers D3 ablation](docs/transformers-d3-real-model-ablation-2026-08-25.md)
 separately verifies the engine path with a pinned tiny model: an exact 28-token
 replay preserves output and reduces target forward calls from 32 to 4. This is
