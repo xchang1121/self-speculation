@@ -25,7 +25,9 @@ endpoint.
 
 ## Shared draft wiring
 
-All verified integrations consume the same boundary-relative `DraftRequest`.
+All verified integrations consume the same boundary-relative `DraftRequest`;
+bundle-capable paths additionally accept an ordered `DraftBundle` of distinct
+alternatives for the same request.
 For a native engine, the engine itself can also be the feedback object:
 
 ```python

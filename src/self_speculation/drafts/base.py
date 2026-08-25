@@ -58,6 +58,24 @@ class DraftRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class DraftBundle:
+    """Ordered alternative continuations for one active main request."""
+
+    request_id: str
+    drafts: tuple[DraftRequest, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "drafts", tuple(self.drafts))
+        if not self.request_id.strip():
+            raise ValueError("draft bundle request_id must not be empty")
+        if not self.drafts:
+            raise ValueError("draft bundle must contain at least one draft")
+        if any(draft.request_id != self.request_id for draft in self.drafts):
+            raise ValueError("every bundled draft must use the bundle request_id")
+
+
+@dataclass(frozen=True, slots=True)
 class DraftReceipt:
     request_id: str
     registered: bool
@@ -73,6 +91,19 @@ class DraftFeedback(Protocol):
     name: str
 
     async def submit(self, draft: DraftRequest) -> DraftReceipt:
+        ...
+
+    async def clear(self, request_id: str) -> None:
+        ...
+
+
+@runtime_checkable
+class DraftBundleFeedback(Protocol):
+    """Optional multi-candidate extension to :class:`DraftFeedback`."""
+
+    name: str
+
+    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
         ...
 
     async def clear(self, request_id: str) -> None:
@@ -108,6 +139,34 @@ class ToolCallDraftBuilder:
         main_request: InferenceRequest,
         fork_request: InferenceRequest,
     ) -> DraftRequest:
+        prompt_token_count: int | None = None
+        if self.prompt_length_resolver is not None:
+            prompt_token_count = int(
+                await _resolve(self.prompt_length_resolver(main_request))
+            )
+        elif "prompt_token_count" in main_request.extra:
+            prompt_token_count = int(main_request.extra["prompt_token_count"])
+
+        return await self.build_for_request(
+            tool_calls,
+            request_id=main_request.request_id,
+            prompt_token_count=prompt_token_count,
+            metadata={
+                "fork_request_id": fork_request.request_id,
+                "formats": tuple(call.format for call in tool_calls),
+            },
+        )
+
+    async def build_for_request(
+        self,
+        tool_calls: tuple[ToolCall, ...],
+        *,
+        request_id: str,
+        prompt_token_count: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> DraftRequest:
+        """Build a concrete-action draft without requiring a fork request."""
+
         if not tool_calls:
             raise ValueError("cannot build a draft without tool calls")
         text = await _resolve(self.formatter(tool_calls))
@@ -120,14 +179,6 @@ class ToolCallDraftBuilder:
             token_ids = tuple(int(item) for item in encoded)
             if self.max_draft_tokens is not None:
                 token_ids = token_ids[: self.max_draft_tokens]
-
-        prompt_token_count: int | None = None
-        if self.prompt_length_resolver is not None:
-            prompt_token_count = int(
-                await _resolve(self.prompt_length_resolver(main_request))
-            )
-        elif "prompt_token_count" in main_request.extra:
-            prompt_token_count = int(main_request.extra["prompt_token_count"])
 
         boundary = (
             self.boundary_resolver(tool_calls)
@@ -149,14 +200,14 @@ class ToolCallDraftBuilder:
                     token_ids=encoded_boundary,
                 )
         return DraftRequest(
-            request_id=main_request.request_id,
+            request_id=request_id,
             text=text,
             token_ids=token_ids,
             boundary=boundary,
             prompt_token_count=prompt_token_count,
             tool_calls=tool_calls,
             metadata={
-                "fork_request_id": fork_request.request_id,
                 "formats": tuple(call.format for call in tool_calls),
+                **dict(metadata or {}),
             },
         )

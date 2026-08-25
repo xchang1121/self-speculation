@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .base import DraftReceipt, DraftRequest
+from .base import DraftBundle, DraftReceipt, DraftRequest
 
 
 BoundaryTokenizer = Callable[[str], Sequence[int]]
@@ -37,6 +37,9 @@ class DraftProposal:
     skipped_prefix_tokens: int
     generated_body_tokens: int
     boundary_index: int
+    candidate_index: int = 0
+    candidate_count: int = 1
+    candidate_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,14 +50,26 @@ class DraftStoreSnapshot:
     proposed_tokens: int
     divergent_drafts: int
     stale_drafts: int
+    bundle_registrations: int = 0
+    registered_candidates: int = 0
+    fallback_injections: int = 0
+
+
+@dataclass(slots=True)
+class _CandidateDraft:
+    token_ids: tuple[int, ...]
+    boundary_token_ids: tuple[int, ...]
+    prompt_token_count: int
+    identity: tuple[object, ...]
+    candidate_id: str | None = None
+    fired: bool = False
 
 
 @dataclass(slots=True)
 class _RequestDraft:
-    token_ids: tuple[int, ...]
-    boundary_token_ids: tuple[int, ...]
-    prompt_token_count: int
-    fired: bool = False
+    candidates: tuple[_CandidateDraft, ...]
+    bundled: bool
+    last_offer_sequence_length: int | None = None
 
 
 class BoundaryDraftStore:
@@ -87,6 +102,9 @@ class BoundaryDraftStore:
         self._proposed_tokens = 0
         self._divergent_drafts = 0
         self._stale_drafts = 0
+        self._bundle_registrations = 0
+        self._registered_candidates = 0
+        self._fallback_injections = 0
 
     def _boundary_tokens(self, draft: DraftRequest) -> tuple[int, ...]:
         if draft.boundary is None:
@@ -103,7 +121,7 @@ class BoundaryDraftStore:
             "draft boundary needs token_ids or a configured boundary_tokenizer"
         )
 
-    def register(self, draft: DraftRequest) -> DraftReceipt:
+    def _candidate(self, draft: DraftRequest) -> _CandidateDraft:
         if not draft.token_ids:
             raise ValueError("engine-side draft feedback requires token_ids")
         boundary_tokens = self._boundary_tokens(draft)
@@ -111,23 +129,91 @@ class BoundaryDraftStore:
             raise ValueError(
                 "engine-side draft feedback requires prompt_token_count"
             )
-        token_ids = draft.token_ids[: self.max_draft_tokens]
-        prompt_token_count = draft.prompt_token_count
+        token_ids = tuple(draft.token_ids[: self.max_draft_tokens])
+        candidate_id_value = draft.metadata.get("candidate_id")
+        candidate_id = (
+            str(candidate_id_value).strip()
+            if candidate_id_value is not None
+            else None
+        )
+        if candidate_id == "":
+            candidate_id = None
+        identity: tuple[object, ...] = (
+            ("id", candidate_id)
+            if candidate_id is not None
+            else ("tokens", token_ids, boundary_tokens)
+        )
+        return _CandidateDraft(
+            token_ids=token_ids,
+            boundary_token_ids=boundary_tokens,
+            prompt_token_count=draft.prompt_token_count,
+            identity=identity,
+            candidate_id=candidate_id,
+        )
+
+    def register(self, draft: DraftRequest) -> DraftReceipt:
+        candidate = self._candidate(draft)
         with self._lock:
             replaced = draft.request_id in self._requests
             self._requests[draft.request_id] = _RequestDraft(
-                token_ids=token_ids,
-                boundary_token_ids=boundary_tokens,
-                prompt_token_count=prompt_token_count,
+                candidates=(candidate,),
+                bundled=False,
             )
             self._registrations += 1
+            self._registered_candidates += 1
         return DraftReceipt(
             request_id=draft.request_id,
             registered=True,
-            draft_token_count=len(token_ids),
+            draft_token_count=len(candidate.token_ids),
             details={
-                "boundary_token_count": len(boundary_tokens),
+                "boundary_token_count": len(candidate.boundary_token_ids),
                 "replaced": replaced,
+            },
+        )
+
+    def register_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+        candidates: list[_CandidateDraft] = []
+        seen: set[tuple[object, ...]] = set()
+        for draft in bundle.drafts:
+            candidate = self._candidate(draft)
+            if candidate.identity in seen:
+                continue
+            seen.add(candidate.identity)
+            candidates.append(candidate)
+        if not candidates:
+            raise ValueError("draft bundle has no distinct candidates")
+
+        with self._lock:
+            previous = self._requests.get(bundle.request_id)
+            if previous is not None and previous.bundled:
+                previous_candidates = {
+                    candidate.identity: candidate
+                    for candidate in previous.candidates
+                }
+                for candidate in candidates:
+                    old = previous_candidates.get(candidate.identity)
+                    if old is not None:
+                        candidate.fired = old.fired
+            self._requests[bundle.request_id] = _RequestDraft(
+                candidates=tuple(candidates),
+                bundled=True,
+                last_offer_sequence_length=(
+                    previous.last_offer_sequence_length
+                    if previous is not None and previous.bundled
+                    else None
+                ),
+            )
+            self._registrations += 1
+            self._bundle_registrations += 1
+            self._registered_candidates += len(candidates)
+        return DraftReceipt(
+            request_id=bundle.request_id,
+            registered=True,
+            draft_token_count=max(len(candidate.token_ids) for candidate in candidates),
+            details={
+                "candidate_count": len(candidates),
+                "input_candidate_count": len(bundle.drafts),
+                "replaced": previous is not None,
             },
         )
 
@@ -148,49 +234,59 @@ class BoundaryDraftStore:
 
         with self._lock:
             state = self._requests.get(request_id)
-            if state is None or state.fired:
+            if state is None or state.last_offer_sequence_length == sequence_length:
                 return None
-            generated = tuple(
-                int(token)
-                for token in sequence_token_ids[
-                    min(state.prompt_token_count, sequence_length) : sequence_length
-                ]
-            )
-            boundary_index = _last_subsequence(
-                generated, state.boundary_token_ids
-            )
-            if boundary_index is None:
-                return None
+            for candidate_index, candidate in enumerate(state.candidates):
+                if candidate.fired:
+                    continue
+                generated = tuple(
+                    int(token)
+                    for token in sequence_token_ids[
+                        min(candidate.prompt_token_count, sequence_length) : sequence_length
+                    ]
+                )
+                boundary_index = _last_subsequence(
+                    generated, candidate.boundary_token_ids
+                )
+                if boundary_index is None:
+                    continue
 
-            body_start = boundary_index + len(state.boundary_token_ids)
-            generated_body = generated[body_start:]
-            if len(generated_body) > self.inject_window:
-                state.fired = True
-                self._stale_drafts += 1
-                return None
+                body_start = boundary_index + len(candidate.boundary_token_ids)
+                generated_body = generated[body_start:]
+                if len(generated_body) > self.inject_window:
+                    candidate.fired = True
+                    self._stale_drafts += 1
+                    continue
 
-            common = _common_prefix_length(generated_body, state.token_ids)
-            if common != len(generated_body):
-                state.fired = True
-                self._divergent_drafts += 1
-                return None
+                common = _common_prefix_length(generated_body, candidate.token_ids)
+                if common != len(generated_body):
+                    candidate.fired = True
+                    self._divergent_drafts += 1
+                    continue
 
-            remaining = state.token_ids[common:]
-            if not remaining:
-                state.fired = True
-                return None
-            limit = min(max_tokens or self.max_draft_tokens, self.max_draft_tokens)
-            proposed = remaining[:limit]
-            state.fired = True
-            self._injections += 1
-            self._proposed_tokens += len(proposed)
-            return DraftProposal(
-                request_id=request_id,
-                token_ids=proposed,
-                skipped_prefix_tokens=common,
-                generated_body_tokens=len(generated_body),
-                boundary_index=boundary_index,
-            )
+                remaining = candidate.token_ids[common:]
+                if not remaining:
+                    candidate.fired = True
+                    continue
+                limit = min(max_tokens or self.max_draft_tokens, self.max_draft_tokens)
+                proposed = remaining[:limit]
+                candidate.fired = True
+                state.last_offer_sequence_length = sequence_length
+                self._injections += 1
+                self._proposed_tokens += len(proposed)
+                if candidate_index > 0:
+                    self._fallback_injections += 1
+                return DraftProposal(
+                    request_id=request_id,
+                    token_ids=proposed,
+                    skipped_prefix_tokens=common,
+                    generated_body_tokens=len(generated_body),
+                    boundary_index=boundary_index,
+                    candidate_index=candidate_index,
+                    candidate_count=len(state.candidates),
+                    candidate_id=candidate.candidate_id,
+                )
+            return None
 
     def clear(self, request_id: str) -> bool:
         with self._lock:
@@ -211,6 +307,9 @@ class BoundaryDraftStore:
                 proposed_tokens=self._proposed_tokens,
                 divergent_drafts=self._divergent_drafts,
                 stale_drafts=self._stale_drafts,
+                bundle_registrations=self._bundle_registrations,
+                registered_candidates=self._registered_candidates,
+                fallback_injections=self._fallback_injections,
             )
 
 
@@ -223,6 +322,9 @@ class BoundaryDraftFeedback:
 
     async def submit(self, draft: DraftRequest) -> DraftReceipt:
         return self.store.register(draft)
+
+    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+        return self.store.register_bundle(bundle)
 
     async def clear(self, request_id: str) -> None:
         self.store.clear(request_id)

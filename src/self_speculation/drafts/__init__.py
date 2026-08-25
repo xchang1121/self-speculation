@@ -1,11 +1,14 @@
 """D3 draft-feedback contracts, formatters, and engine bridges."""
 
 from .base import (
+    DraftBundle,
+    DraftBundleFeedback,
     DraftBoundary,
     DraftBuilder,
     DraftFeedback,
     DraftReceipt,
     DraftRequest,
+    DraftTokenizer,
     ToolCallDraftBuilder,
 )
 from .callable import (
@@ -29,6 +32,8 @@ __all__ = [
     "BoundaryDraftFeedback",
     "BoundaryDraftStore",
     "BoundaryTokenizer",
+    "DraftBundle",
+    "DraftBundleFeedback",
     "DraftBoundary",
     "DraftBuilder",
     "DraftClearer",
@@ -38,6 +43,7 @@ __all__ = [
     "DraftReceipt",
     "DraftRequest",
     "DraftSubmitter",
+    "DraftTokenizer",
     "DraftStoreSnapshot",
     "HTTPDraftFeedback",
     "SporkHTTPDraftFeedback",

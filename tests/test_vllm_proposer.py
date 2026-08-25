@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from self_speculation import (
     DraftBoundary,
+    DraftBundle,
     DraftRequest,
     SelfSpeculationEndpointPlugin,
     VLLMBoundaryProposer,
@@ -92,6 +93,27 @@ class VLLMBoundaryProposerTest(unittest.TestCase):
         self.assertTrue(proposer.clear_request("main")["removed"])
         self.assertEqual(proposer.clear_all()["removed"], 0)
 
+    def test_uses_ranked_bundle_fallback_after_target_rejection(self) -> None:
+        proposer = self.proposer()
+        result = proposer.register_draft_bundle(
+            "main",
+            [[20, 21], [20, 99, 30]],
+            [[10], [10]],
+            2,
+            candidate_ids=["first", "fallback"],
+        )
+        proposer.set_request_ids(("main",))
+
+        first = proposer.propose([[1]], [3], [[90, 91, 10]])
+        fallback = proposer.propose(
+            [[1]], [5], [[90, 91, 10, 20, 99]]
+        )
+
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(first, [[20, 21]])
+        self.assertEqual(fallback, [[30]])
+        self.assertEqual(proposer.status()["fallback_injections"], 1)
+
 
 class VLLMWorkerRPCBridgeTest(unittest.TestCase):
     def test_installs_registration_cleanup_and_status_methods(self) -> None:
@@ -114,6 +136,9 @@ class VLLMWorkerRPCBridgeTest(unittest.TestCase):
         registered = worker.self_speculation_register_draft(
             "main", [1, 2], [9], None
         )
+        bundled = worker.self_speculation_register_draft_bundle(
+            "main", [[1, 2], [1, 3]], [[9], [9]], None, ["a", "b"]
+        )
         status = worker.self_speculation_draft_status()
         proposer.set_request_ids(("cmpl-main-0-random",))
         before_new_boundary = proposer.propose([[1]], [3], [[9, 8, 7]])
@@ -122,6 +147,7 @@ class VLLMWorkerRPCBridgeTest(unittest.TestCase):
         cleared = worker.self_speculation_clear_draft("main")
 
         self.assertTrue(registered["registered"])
+        self.assertEqual(bundled["candidate_count"], 2)
         self.assertEqual(registered["internal_request_id"], "cmpl-main-0-random")
         self.assertEqual(status["active_requests"], 1)
         self.assertEqual(before_new_boundary, [[]])
@@ -168,7 +194,7 @@ class FakeAsyncEngineClient:
         self.calls.append((method, timeout, args))
         if self.results is not None:
             return self.results
-        if method.endswith("register_draft"):
+        if method.endswith(("register_draft", "register_draft_bundle")):
             return [
                 {"status": "ok", "registered": True, "draft_token_count": 2},
                 {"status": "skipped", "reason": "no_boundary_proposer"},
@@ -176,6 +202,35 @@ class FakeAsyncEngineClient:
         if method.endswith("draft_status"):
             return [{"status": "ok", "active_requests": 1}]
         return [{"status": "cleared"}, {"status": "skipped"}]
+
+
+class FakeTokenizer:
+    def encode(self, text, *, add_special_tokens):
+        assert add_special_tokens is False
+        return list(text.encode("utf-8"))
+
+
+class ActivatingEngineClient(FakeAsyncEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.renderer = SimpleNamespace(tokenizer=FakeTokenizer())
+        self.pending_registrations = 2
+
+    async def collective_rpc(self, method, *, timeout=None, args=()):
+        self.calls.append((method, timeout, args))
+        if method.endswith("register_draft_bundle"):
+            if self.pending_registrations:
+                self.pending_registrations -= 1
+                return [{"status": "pending", "reason": "request_not_active"}]
+            return [
+                {
+                    "status": "ok",
+                    "registered": True,
+                    "draft_token_count": 4,
+                    "candidate_count": len(args[1]),
+                }
+            ]
+        return [{"status": "cleared"}]
 
 
 class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
@@ -197,6 +252,41 @@ class VLLMCollectiveRPCDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args, ("main", [20, 21], [10, 11], 4))
         self.assertEqual(receipt.draft_token_count, 2)
         self.assertEqual(client.calls[1][0], "self_speculation_clear_draft")
+
+    async def test_registers_an_ordered_bundle_across_workers(self) -> None:
+        client = FakeAsyncEngineClient()
+        feedback = VLLMCollectiveRPCDraftFeedback(client)
+        bundle = DraftBundle(
+            "main",
+            (
+                DraftRequest(
+                    request_id="main",
+                    token_ids=(20, 21),
+                    boundary=DraftBoundary(token_ids=(10,)),
+                    metadata={"candidate_id": "first"},
+                ),
+                DraftRequest(
+                    request_id="main",
+                    token_ids=(20, 99),
+                    boundary=DraftBoundary(token_ids=(10,)),
+                    metadata={"candidate_id": "fallback"},
+                ),
+            ),
+        )
+
+        receipt = await feedback.submit_bundle(bundle)
+
+        self.assertEqual(receipt.details["candidate_count"], 2)
+        self.assertEqual(
+            client.calls[0][2],
+            (
+                "main",
+                [[20, 21], [20, 99]],
+                [[10], [10]],
+                None,
+                ["first", "fallback"],
+            ),
+        )
 
     async def test_rejects_invalid_drafts_or_missing_proposers(self) -> None:
         feedback = VLLMCollectiveRPCDraftFeedback(
@@ -248,6 +338,124 @@ class VLLMHTTPRoutesTest(unittest.IsolatedAsyncioTestCase):
             engine_client.calls[-1][2],
             ("main/one",),
         )
+        await client.aclose()
+
+    async def test_round_trips_a_tokenized_bundle_route(self) -> None:
+        app = FastAPI()
+        engine_client = FakeAsyncEngineClient()
+        app.state.engine_client = engine_client
+        install_vllm_http_routes(app)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://vllm",
+        )
+
+        response = await client.post(
+            "/self-speculation/draft-bundles",
+            json={
+                "request_id": "main",
+                "drafts": [
+                    {
+                        "token_ids": [20, 21],
+                        "boundary": {"token_ids": [10]},
+                        "metadata": {"candidate_id": "first"},
+                    },
+                    {
+                        "token_ids": [20, 99],
+                        "boundary": {"token_ids": [10]},
+                        "metadata": {"candidate_id": "fallback"},
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["details"]["candidate_count"], 2)
+        self.assertTrue(engine_client.calls[0][0].endswith("register_draft_bundle"))
+        await client.aclose()
+
+    async def test_remote_feedback_submits_a_complete_bundle(self) -> None:
+        app = FastAPI()
+        engine_client = FakeAsyncEngineClient()
+        app.state.engine_client = engine_client
+        install_vllm_http_routes(app)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://vllm",
+        )
+        feedback = VLLMHTTPDraftFeedback("http://vllm", client=client)
+        bundle = DraftBundle(
+            request_id="main",
+            drafts=(
+                DraftRequest(
+                    request_id="main",
+                    token_ids=(20, 21),
+                    boundary=DraftBoundary(token_ids=(10,)),
+                    metadata={"candidate_id": "first"},
+                ),
+                DraftRequest(
+                    request_id="main",
+                    token_ids=(20, 99),
+                    boundary=DraftBoundary(token_ids=(10,)),
+                    metadata={"candidate_id": "fallback"},
+                ),
+            ),
+        )
+
+        receipt = await feedback.submit_bundle(bundle)
+
+        self.assertTrue(receipt.registered)
+        self.assertEqual(receipt.details["candidate_count"], 2)
+        self.assertTrue(engine_client.calls[0][0].endswith("register_draft_bundle"))
+        self.assertEqual(
+            engine_client.calls[0][2][-1],
+            ["first", "fallback"],
+        )
+        await client.aclose()
+
+    async def test_tokenizes_concrete_candidates_and_waits_for_actor_admission(self) -> None:
+        app = FastAPI()
+        engine_client = ActivatingEngineClient()
+        app.state.engine_client = engine_client
+        install_vllm_http_routes(
+            app,
+            registration_wait_timeout=0.2,
+            registration_retry_interval=0.001,
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://vllm",
+        )
+
+        response = await client.post(
+            "/self-speculation/candidates",
+            json={
+                "request_id": "actor",
+                "format": "tagged_json",
+                "boundary": "<tool_call>",
+                "max_draft_tokens": 20,
+                "candidates": [
+                    {
+                        "id": "candidate-a",
+                        "sources": ["drafter", "pattern-aware"],
+                        "tool_call": {
+                            "name": "read",
+                            "arguments": {"path": "a.txt"},
+                        },
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["details"]["candidate_count"], 1)
+        self.assertEqual(engine_client.pending_registrations, 0)
+        self.assertEqual(len(engine_client.calls), 3)
+        _, _, args = engine_client.calls[-1]
+        self.assertEqual(args[0], "actor")
+        self.assertEqual(args[4], ["candidate-a"])
+        self.assertTrue(args[1][0])
+        self.assertTrue(args[2][0])
         await client.aclose()
 
     async def test_rejects_invalid_route_payloads(self) -> None:

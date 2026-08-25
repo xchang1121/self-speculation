@@ -4,6 +4,7 @@ import unittest
 
 from self_speculation import (
     DraftBoundary,
+    DraftBundle,
     DraftRequest,
     InferenceRequest,
     ToolCall,
@@ -102,6 +103,10 @@ class DraftModelTest(unittest.TestCase):
             DraftBoundary()
         with self.assertRaises(ValueError):
             DraftRequest(request_id="x")
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            DraftBundle("x", ())
+        with self.assertRaisesRegex(ValueError, "bundle request_id"):
+            DraftBundle("x", (DraftRequest(request_id="y", text="draft"),))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from self_speculation import (
     BoundaryDraftFeedback,
     BoundaryDraftStore,
+    DraftBundle,
     DraftBoundary,
     DraftRequest,
 )
@@ -83,6 +84,68 @@ class BoundaryDraftStoreTest(unittest.TestCase):
             )
         self.assertEqual(sum(item is not None for item in proposals), 1)
 
+    def test_bundle_falls_through_after_target_rejects_the_first_choice(self) -> None:
+        store = BoundaryDraftStore(max_draft_tokens=8)
+        store.register_bundle(
+            DraftBundle(
+                request_id="bundle",
+                drafts=(
+                    draft("bundle", tokens=(20, 21), boundary=(10,)),
+                    DraftRequest(
+                        request_id="bundle",
+                        token_ids=(20, 99, 30),
+                        boundary=DraftBoundary(token_ids=(10,)),
+                        prompt_token_count=2,
+                        metadata={"candidate_id": "fallback"},
+                    ),
+                ),
+            )
+        )
+
+        first = store.offer("bundle", [90, 91, 10])
+        duplicate_step = store.offer("bundle", [90, 91, 10])
+        fallback = store.offer("bundle", [90, 91, 10, 20, 99])
+
+        self.assertEqual(first.token_ids if first else (), (20, 21))
+        self.assertIsNone(duplicate_step)
+        self.assertEqual(fallback.token_ids if fallback else (), (30,))
+        assert fallback is not None
+        self.assertEqual(fallback.candidate_index, 1)
+        self.assertEqual(fallback.candidate_id, "fallback")
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot.bundle_registrations, 1)
+        self.assertEqual(snapshot.registered_candidates, 2)
+        self.assertEqual(snapshot.fallback_injections, 1)
+
+    def test_bundle_replacement_preserves_already_offered_candidates(self) -> None:
+        store = BoundaryDraftStore(max_draft_tokens=8)
+        first = DraftRequest(
+            request_id="replace",
+            token_ids=(20, 21),
+            boundary=DraftBoundary(token_ids=(10,)),
+            prompt_token_count=0,
+            metadata={"candidate_id": "first"},
+        )
+        second = DraftRequest(
+            request_id="replace",
+            token_ids=(20, 99, 30),
+            boundary=DraftBoundary(token_ids=(10,)),
+            prompt_token_count=0,
+            metadata={"candidate_id": "second"},
+        )
+        store.register_bundle(DraftBundle("replace", (first, second)))
+        self.assertEqual(store.offer("replace", [10]).candidate_id, "first")
+
+        receipt = store.register_bundle(
+            DraftBundle("replace", (first, second, second))
+        )
+        self.assertIsNone(store.offer("replace", [10]))
+        proposal = store.offer("replace", [10, 20, 99])
+
+        self.assertEqual(receipt.details["candidate_count"], 2)
+        self.assertEqual(receipt.details["input_candidate_count"], 3)
+        self.assertEqual(proposal.candidate_id if proposal else None, "second")
+
     def test_tokenizes_text_boundaries_and_validates_inputs(self) -> None:
         store = BoundaryDraftStore(boundary_tokenizer=lambda text: [7, 8])
         store.register(
@@ -127,6 +190,14 @@ class BoundaryDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(receipt.registered)
         await feedback.clear("async")
         self.assertEqual(store.snapshot().active_requests, 0)
+
+    async def test_submits_an_ordered_bundle(self) -> None:
+        store = BoundaryDraftStore()
+        feedback = BoundaryDraftFeedback(store)
+        receipt = await feedback.submit_bundle(
+            DraftBundle("bundle", (draft("bundle"), draft("bundle", tokens=(30,))))
+        )
+        self.assertEqual(receipt.details["candidate_count"], 2)
 
 
 if __name__ == "__main__":

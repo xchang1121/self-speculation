@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import asyncio
+import unittest
+from collections.abc import AsyncIterator
+
+import httpx
+from fastapi import FastAPI
+
+from self_speculation import (
+    CandidateBundleBuilder,
+    ControlRequestClosedError,
+    DraftBundle,
+    DraftReceipt,
+    EngineCapabilities,
+    InferenceRequest,
+    SelfSpeculationControlPlane,
+    SnapshotForkRunner,
+    StreamChunk,
+    install_self_speculation_routes,
+)
+
+
+def encode(text: str) -> list[int]:
+    return list(text.encode("utf-8"))
+
+
+class CandidateBundleBuilderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_builds_ranked_concrete_calls_with_one_target_tokenizer(self) -> None:
+        builder = CandidateBundleBuilder(
+            tokenizer=encode,
+            max_draft_tokens=12,
+        )
+
+        bundle = await builder.build(
+            {
+                "version": 1,
+                "request_id": "actor-request",
+                "format": "tagged_json",
+                "boundary": "<tool_call>",
+                "max_draft_tokens": 8,
+                "model": {"id": "tiny"},
+                "candidates": [
+                    {
+                        "id": "read-a",
+                        "sources": ["drafter", "pattern-aware"],
+                        "provenance": [{"proposalID": "p", "actionID": "a"}],
+                        "tool_call": {
+                            "name": "read",
+                            "arguments": {"path": "a.txt"},
+                        },
+                        "score": {"conditional_probability": 0.9},
+                    },
+                    {
+                        "id": "read-b",
+                        "sources": ["drafter"],
+                        "tool_call": {
+                            "name": "read",
+                            "arguments": {"path": "b.txt"},
+                        },
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(bundle.request_id, "actor-request")
+        self.assertEqual(len(bundle.drafts), 2)
+        self.assertEqual(
+            [draft.metadata["candidate_id"] for draft in bundle.drafts],
+            ["read-a", "read-b"],
+        )
+        self.assertEqual(
+            bundle.drafts[0].metadata["sources"],
+            ("drafter", "pattern-aware"),
+        )
+        self.assertEqual(bundle.drafts[0].tool_calls[0].name, "read")
+        self.assertLessEqual(len(bundle.drafts[0].token_ids), 8)
+        self.assertEqual(
+            bundle.drafts[0].boundary.token_ids,
+            tuple(encode("<tool_call>")),
+        )
+
+    async def test_rejects_unbounded_or_malformed_candidate_payloads(self) -> None:
+        builder = CandidateBundleBuilder(tokenizer=encode, max_candidates=1)
+        with self.assertRaisesRegex(ValueError, "server limit"):
+            await builder.build(
+                {
+                    "request_id": "x",
+                    "candidates": [
+                        {"tool_call": {"name": "a"}},
+                        {"tool_call": {"name": "b"}},
+                    ],
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "tool_call"):
+            await builder.build(
+                {"request_id": "x", "candidates": [{"id": "bad"}]}
+            )
+
+
+class RecordingBundleFeedback:
+    name = "recording-bundles"
+
+    def __init__(self) -> None:
+        self.bundles: list[DraftBundle] = []
+        self.cleared: list[str] = []
+
+    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+        self.bundles.append(bundle)
+        return DraftReceipt(
+            request_id=bundle.request_id,
+            registered=True,
+            draft_token_count=max(len(draft.token_ids) for draft in bundle.drafts),
+            details={"candidate_count": len(bundle.drafts)},
+        )
+
+    async def clear(self, request_id: str) -> None:
+        self.cleared.append(request_id)
+
+
+class GatedBundleFeedback(RecordingBundleFeedback):
+    def __init__(self) -> None:
+        super().__init__()
+        self.slow_started = asyncio.Event()
+        self.release_slow = asyncio.Event()
+
+    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+        if bundle.request_id == "slow":
+            self.slow_started.set()
+            await self.release_slow.wait()
+        return await super().submit_bundle(bundle)
+
+
+class ForkEngine:
+    name = "fork-engine"
+    capabilities = EngineCapabilities(prompt=True, logprobs=True, prefix_cache=True)
+
+    def __init__(self) -> None:
+        self.requests: list[InferenceRequest] = []
+
+    async def stream(
+        self, request: InferenceRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
+        yield StreamChunk(
+            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>'
+        )
+
+
+class AgreeingForkEngine(ForkEngine):
+    async def stream(
+        self, request: InferenceRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
+        yield StreamChunk(
+            text='{"name":"read","arguments":{"path":"in.txt"}}</tool_call>'
+        )
+
+
+class GatedForkEngine(ForkEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream(
+        self, request: InferenceRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
+        self.started.set()
+        await self.release.wait()
+        yield StreamChunk(
+            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>'
+        )
+
+
+class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
+    def fixture(self):
+        feedback = RecordingBundleFeedback()
+        engine = ForkEngine()
+        runner = SnapshotForkRunner(
+            engine,
+            encode,
+            max_draft_tokens=32,
+        )
+        plane = SelfSpeculationControlPlane(
+            feedback,
+            CandidateBundleBuilder(tokenizer=encode, max_draft_tokens=32),
+            fork_runner=runner,
+        )
+        return plane, feedback, engine
+
+    async def test_merges_external_sources_and_self_fork_into_one_bundle(self) -> None:
+        plane, feedback, engine = self.fixture()
+        await plane.submit_candidates(candidate_payload())
+        receipt = await plane.fork(fork_payload())
+
+        self.assertEqual(receipt.details["candidate_count"], 2)
+        self.assertEqual(len(feedback.bundles), 2)
+        merged = feedback.bundles[-1]
+        self.assertEqual(
+            [draft.metadata["sources"] for draft in merged.drafts],
+            [("drafter", "pattern-aware"), ("self-speculation",)],
+        )
+        self.assertTrue(
+            str(merged.drafts[-1].metadata["candidate_id"]).startswith("self:")
+        )
+        self.assertEqual(
+            engine.requests[0].prompt,
+            "PROMPTobserved<tool_call>",
+        )
+        self.assertEqual(
+            engine.requests[0].extra,
+            {"logprobs": True, "top_logprobs": 1},
+        )
+
+        await plane.clear("actor-request")
+        self.assertEqual(feedback.cleared, ["actor-request"])
+
+    async def test_deduplicates_self_agreement_by_complete_draft_content(self) -> None:
+        feedback = RecordingBundleFeedback()
+        engine = AgreeingForkEngine()
+        plane = SelfSpeculationControlPlane(
+            feedback,
+            CandidateBundleBuilder(tokenizer=encode, max_draft_tokens=32),
+            fork_runner=SnapshotForkRunner(
+                engine,
+                encode,
+                max_draft_tokens=32,
+            ),
+        )
+
+        await plane.submit_candidates(candidate_payload())
+        receipt = await plane.fork(fork_payload())
+
+        self.assertEqual(receipt.details["candidate_count"], 1)
+        merged = feedback.bundles[-1].drafts[0]
+        self.assertEqual(
+            merged.metadata["sources"],
+            ("drafter", "pattern-aware", "self-speculation"),
+        )
+        self.assertEqual(merged.metadata["source_count"], 3)
+        self.assertEqual(len(merged.metadata["candidate_ids"]), 2)
+
+    async def test_clear_fences_a_late_fork_without_blocking_cleanup(self) -> None:
+        feedback = RecordingBundleFeedback()
+        engine = GatedForkEngine()
+        plane = SelfSpeculationControlPlane(
+            feedback,
+            CandidateBundleBuilder(tokenizer=encode),
+            fork_runner=SnapshotForkRunner(engine, encode),
+        )
+        fork = asyncio.create_task(plane.fork(fork_payload()))
+        await engine.started.wait()
+
+        await plane.clear("actor-request")
+        engine.release.set()
+
+        with self.assertRaises(ControlRequestClosedError):
+            await fork
+        self.assertEqual(feedback.bundles, [])
+        self.assertEqual(feedback.cleared, ["actor-request"])
+        with self.assertRaises(ControlRequestClosedError):
+            await plane.submit_candidates(candidate_payload())
+
+    async def test_slow_feedback_does_not_serialize_unrelated_request_ids(self) -> None:
+        feedback = GatedBundleFeedback()
+        plane = SelfSpeculationControlPlane(
+            feedback,
+            CandidateBundleBuilder(tokenizer=encode),
+        )
+        slow_payload = {**candidate_payload(), "request_id": "slow"}
+        fast_payload = {**candidate_payload(), "request_id": "fast"}
+        slow = asyncio.create_task(plane.submit_candidates(slow_payload))
+        await feedback.slow_started.wait()
+
+        fast = await asyncio.wait_for(
+            plane.submit_candidates(fast_payload), timeout=0.1
+        )
+        feedback.release_slow.set()
+        await slow
+
+        self.assertEqual(fast.request_id, "fast")
+        self.assertEqual(
+            [bundle.request_id for bundle in feedback.bundles],
+            ["fast", "slow"],
+        )
+
+    async def test_installs_the_agent_facing_http_contract(self) -> None:
+        plane, feedback, _ = self.fixture()
+        app = FastAPI()
+        self.assertTrue(install_self_speculation_routes(app, plane))
+        self.assertFalse(install_self_speculation_routes(app, plane))
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://control",
+        )
+
+        candidates = await client.post(
+            "/self-speculation/candidates", json=candidate_payload()
+        )
+        fork = await client.post("/self-speculation/fork", json=fork_payload())
+        clear = await client.post(
+            "/self-speculation/clear",
+            json={"request_id": "actor-request"},
+        )
+
+        self.assertEqual(candidates.status_code, 200)
+        self.assertEqual(fork.status_code, 200)
+        self.assertEqual(fork.json()["details"]["candidate_count"], 2)
+        self.assertEqual(clear.status_code, 200)
+        self.assertEqual(feedback.cleared, ["actor-request"])
+        await client.aclose()
+
+
+def candidate_payload():
+    return {
+        "request_id": "actor-request",
+        "format": "tagged_json",
+        "boundary": "<tool_call>",
+        "candidates": [
+            {
+                "id": "external",
+                "sources": ["drafter", "pattern-aware"],
+                "tool_call": {
+                    "name": "read",
+                    "arguments": {"path": "in.txt"},
+                },
+            }
+        ],
+    }
+
+
+def fork_payload():
+    return {
+        "request_id": "actor-request",
+        "model": {"id": "tiny"},
+        "context": {
+            "provider_payload": {"model": "tiny", "prompt": "PROMPT"}
+        },
+        "snapshot": {
+            "generated_text": "observed",
+            "content": "observed",
+            "chunk_count": 1,
+            "output_chunk_count": 1,
+        },
+        "options": {
+            "forced_prefix": "<tool_call>",
+            "decoder": "tagged_json",
+            "draft_format": "tagged_json",
+            "draft_boundary": "<tool_call>",
+            "max_tokens": 64,
+            "max_draft_tokens": 20,
+            "temperature": 0,
+            "require_logprobs": True,
+        },
+    }
+
+
+if __name__ == "__main__":
+    unittest.main()

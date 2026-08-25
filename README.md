@@ -26,7 +26,8 @@ for setup instructions and verified-injection support.
 - structured-delta decoding plus nine built-in text parser branches;
 - adapters for arbitrary callbacks, OpenAI-compatible servers, native vLLM,
   Transformers, and `llama-cpp-python` generation;
-- portable callback/HTTP draft feedback and a request-scoped boundary store;
+- portable callback/HTTP draft feedback, an agent-facing control plane, ordered
+  multi-source draft bundles, and a request-scoped boundary store;
 - verified D3 integrations for vLLM, Transformers, SGLang NGRAM, and
   `llama-cpp-python`;
 - typed lifecycle events, best-effort acceleration failures, and strict modes.
@@ -186,14 +187,38 @@ main request ID.
 | `LlamaCppPythonEngine` | in-process llama.cpp draft-model injection |
 
 The store excludes prompt history, matches single- or multi-token boundaries,
-checks any already-generated action prefix, offers only the remaining suffix,
-and fires at most once per request. The target engine still verifies every
-proposed token; disagreement falls back to ordinary target-model decoding.
+checks any already-generated action prefix, and offers only the remaining
+suffix. A ranked bundle falls through to the next distinct action after target
+rejection; each candidate fires at most once. Incremental bundle replacement
+preserves already-fired identities. The target engine still verifies every
+proposed token, so disagreement falls back to ordinary target-model decoding.
+
+### Agent-facing unified control plane
+
+`CandidateBundleBuilder` converts ranked concrete tool calls from any agent
+predictor with the target tokenizer. `SelfSpeculationControlPlane` combines
+that external bundle with an optional D1 `SnapshotForkRunner`, deduplicates
+identical complete drafts while merging provenance, and submits one ordered
+`DraftBundle` to the target verifier. Its portable FastAPI routes are:
+
+| Route | Purpose |
+| --- | --- |
+| `POST /self-speculation/candidates` | replace the current external candidate set |
+| `POST /self-speculation/fork` | run one self-fork from a captured Actor snapshot |
+| `POST /self-speculation/clear` | fence late updates and clear verifier state |
+
+All three operations use the same high-entropy Actor request ID. Candidate and
+fork work is serialized only within that ID; unrelated requests remain
+concurrent. Clear installs a bounded tombstone before waiting for in-flight
+work, so a late fork cannot recreate a closed request. See the
+[vLLM guide](docs/vllm.md#agent-sidecar-for-unified-candidates-and-self-fork)
+for complete wiring.
 
 ### vLLM quick start
 
 Install the package in the vLLM frontend and worker environments, then opt in
-to the endpoint plugin and custom proposer:
+to the paired endpoint/worker plugin and custom proposer. Both plugin entry
+points use the name `self_speculation`, so one allowlist value enables both:
 
 ```bash
 export VLLM_PLUGINS=self_speculation

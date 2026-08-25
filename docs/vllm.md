@@ -1,11 +1,15 @@
 # vLLM integration
 
-This integration combines four pieces:
+This integration combines five pieces:
 
 - vLLM's experimental `custom_class` speculative proposer;
 - a narrow request-ID hook around `GPUModelRunner.propose_draft_token_ids`;
-- three worker `collective_rpc` methods for register, clear, and status;
-- an opt-in `vllm.endpoint_plugins` entry point for remote HTTP clients.
+- a paired `vllm.general_plugins` entry point that installs worker RPC methods
+  on every pipeline rank;
+- four worker `collective_rpc` methods for single/bundle register, clear, and
+  status;
+- an opt-in `vllm.endpoint_plugins` entry point for tokenized drafts, concrete
+  candidates, cleanup, and status.
 
 The package does not depend on vLLM at import time. Incompatible vLLM V1
 internals fail during proposer startup instead of silently routing a draft by
@@ -25,8 +29,9 @@ published artifact or repository URL.
 
 ## Start an OpenAI-compatible server
 
-The endpoint plugin is deliberately disabled by vLLM unless explicitly
-allowlisted. Start the server with a unique allowlist entry and the custom
+The endpoint and worker plugins deliberately share the entry-point name
+`self_speculation`, so one explicit vLLM allowlist entry enables the HTTP and
+worker halves together. Start the server with that allowlist and the custom
 proposer:
 
 ```bash
@@ -60,6 +65,80 @@ curl http://127.0.0.1:8000/self-speculation/status
 
 At least one worker result should have `"status":"ok"`. Pipeline stages that
 do not own the proposer report `"status":"skipped"` and are expected.
+
+The endpoint exposes `POST /self-speculation/drafts`, `/draft-bundles`,
+`/candidates`, and `/clear`. The concrete-candidate route tokenizes every
+boundary-relative tool-call body with the target tokenizer exposed by vLLM's
+engine client, then registers one ordered bundle. Registration waits for the
+matching main request to become active for a bounded interval, covering the
+normal race between the OpenAI request and its control update.
+
+## Agent sidecar for unified candidates and self-fork
+
+The vLLM endpoint plugin can accept external candidates directly, but it does
+not observe a separate agent's Actor stream and therefore does not expose
+`/fork`. Run the portable control plane on a private sidecar port when the
+agent should submit Drafter/PatternAware candidates and automatically start a
+D1 fork from its first Actor delta:
+
+```python
+from fastapi import FastAPI
+from transformers import AutoTokenizer
+
+from self_speculation import (
+    CandidateBundleBuilder,
+    SelfSpeculationControlPlane,
+    SnapshotForkRunner,
+    VLLMEngine,
+    VLLMHTTPDraftFeedback,
+    install_self_speculation_routes,
+)
+
+MODEL = "YOUR_MODEL"
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
+fork_engine = VLLMEngine("http://127.0.0.1:8000/v1", prefix_cache=True)
+feedback = VLLMHTTPDraftFeedback("http://127.0.0.1:8000")
+
+
+def encode(text: str) -> list[int]:
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+def render(request) -> str:
+    return tokenizer.apply_chat_template(
+        list(request.messages),
+        tools=list(request.tools) or None,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
+control_plane = SelfSpeculationControlPlane(
+    feedback,
+    CandidateBundleBuilder(encode, max_candidates=64, max_draft_tokens=20),
+    fork_runner=SnapshotForkRunner(
+        fork_engine,
+        encode,
+        prompt_renderer=render,
+        max_draft_tokens=20,
+    ),
+)
+app = FastAPI()
+install_self_speculation_routes(app, control_plane)
+```
+
+Serve this app on (for example) `127.0.0.1:8010`, point the agent bridge at
+that URL, and select its `sidecar` fork transport. The sidecar sends the merged
+bundle to vLLM through `/draft-bundles`; vLLM remains the only target verifier.
+Use an application lifespan hook to close `fork_engine` and `feedback` during
+shutdown.
+
+If only external concrete actions are needed, point the agent directly at the
+vLLM server and disable its sidecar fork. A `provider` transport is a separate
+contract: the serving provider must explicitly interpret the injected
+`self_speculation` request object and start its own Actor or Drafter fork.
+Stock OpenAI-compatible request parsing and this endpoint plugin do not turn
+unknown request fields into a fork automatically.
 
 ## Connect a controller over HTTP
 
@@ -202,7 +281,7 @@ plugins that you trust.
 | --- | --- |
 | `404` under `/self-speculation` | package installed in frontend environment and `VLLM_PLUGINS=self_speculation` |
 | all status rows are `skipped` | server uses the `VLLMBoundaryProposer` custom speculative config |
-| `active vLLM request not found` | use `VLLMEngine`, or ensure another client sends a matching `request_id` body field |
+| `active vLLM request not found` | use `VLLMEngine`, or ensure another client sends a matching `request_id` body field; candidate registration retries only for its configured bounded interval |
 | ambiguous external request ID | generate unique IDs; do not reuse prefix-related IDs concurrently |
 | boundary-token validation error | use the served model tokenizer with `add_special_tokens=False` |
 | draft submitted but no injection | main request did not reach the boundary, diverged from the draft, or exceeded the injection window |
@@ -210,6 +289,6 @@ plugins that you trust.
 
 The implementation follows the current official vLLM
 [custom proposer](https://docs.vllm.ai/en/stable/features/speculative_decoding/)
-and [endpoint plugin](https://docs.vllm.ai/en/stable/design/plugin_system/)
+and [endpoint plugin](https://docs.vllm.ai/en/stable/design/endpoint_plugins/)
 interfaces. Both are evolving extension surfaces, so pin and integration-test
 the vLLM version used in production.
