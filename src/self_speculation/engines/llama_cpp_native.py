@@ -61,7 +61,7 @@ class LlamaCppBoundaryDraftModel:
         self,
         store: BoundaryDraftStore,
         *,
-        max_tokens: int = 20,
+        max_tokens: int = 28,
     ) -> None:
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")

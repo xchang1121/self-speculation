@@ -70,6 +70,13 @@ class FakeLlama:
 
 
 class LlamaCppPythonEngineTest(unittest.IsolatedAsyncioTestCase):
+    def test_default_draft_cap_matches_the_evidence_backed_store_cap(self) -> None:
+        store = BoundaryDraftStore()
+        draft_model = LlamaCppBoundaryDraftModel(store)
+
+        self.assertEqual(draft_model.max_tokens, 28)
+        self.assertEqual(draft_model.max_tokens, store.max_draft_tokens)
+
     @unittest.skipUnless(HAS_NUMPY, "llama-cpp-python requires numpy")
     async def test_injects_request_scoped_candidates_into_draft_model(self) -> None:
         store = BoundaryDraftStore(max_draft_tokens=4)

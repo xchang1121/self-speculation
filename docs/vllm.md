@@ -42,7 +42,7 @@ vllm serve YOUR_MODEL \
   --speculative-config '{
     "method": "custom_class",
     "model": "self_speculation.integrations.vllm.VLLMBoundaryProposer",
-    "num_speculative_tokens": 20
+    "num_speculative_tokens": 28
   }'
 ```
 
