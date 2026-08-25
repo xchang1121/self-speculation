@@ -192,6 +192,9 @@ suffix. A ranked bundle falls through to the next distinct action after target
 rejection; each candidate fires at most once. Incremental bundle replacement
 preserves already-fired identities. The target engine still verifies every
 proposed token, so disagreement falls back to ordinary target-model decoding.
+The default action-draft cap is 28 tokens, the smallest saturation point in the
+[recorded D3 length ablation](docs/d3-draft-length-ablation-2026-08-25.md);
+explicit application and engine caps still take precedence.
 
 ### Agent-facing unified control plane
 

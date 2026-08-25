@@ -115,12 +115,12 @@ def render(request) -> str:
 
 control_plane = SelfSpeculationControlPlane(
     feedback,
-    CandidateBundleBuilder(encode, max_candidates=64, max_draft_tokens=20),
+    CandidateBundleBuilder(encode, max_candidates=64, max_draft_tokens=28),
     fork_runner=SnapshotForkRunner(
         fork_engine,
         encode,
         prompt_renderer=render,
-        max_draft_tokens=20,
+        max_draft_tokens=28,
     ),
 )
 app = FastAPI()
@@ -195,7 +195,7 @@ async def main() -> None:
             formatter=format_tool_call_draft,
             tokenizer=encode,
             boundary_resolver=default_draft_boundary,
-            max_draft_tokens=20,
+            max_draft_tokens=28,
         ),
     )
 

@@ -84,7 +84,7 @@ class BoundaryDraftStore:
     def __init__(
         self,
         *,
-        max_draft_tokens: int = 20,
+        max_draft_tokens: int = 28,
         inject_window: int = 200,
         boundary_tokenizer: BoundaryTokenizer | None = None,
     ) -> None:

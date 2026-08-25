@@ -43,7 +43,7 @@ draft_builder = ToolCallDraftBuilder(
     tokenizer=engine.tokenize_continuation,
     boundary_resolver=default_draft_boundary,
     prompt_length_resolver=engine.prompt_token_count,
-    max_draft_tokens=20,
+    max_draft_tokens=28,
 )
 
 controller = ForkController(
@@ -75,12 +75,12 @@ from self_speculation import BoundaryDraftStore, TransformersEngine
 model_id = "YOUR_MODEL"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto").eval()
-store = BoundaryDraftStore(max_draft_tokens=20)
+store = BoundaryDraftStore(max_draft_tokens=28)
 engine = TransformersEngine(
     model,
     tokenizer,
     draft_store=store,
-    max_draft_tokens=20,
+    max_draft_tokens=28,
 )
 ```
 
@@ -112,8 +112,8 @@ from self_speculation import (
     LlamaCppPythonEngine,
 )
 
-store = BoundaryDraftStore(max_draft_tokens=20)
-draft_model = LlamaCppBoundaryDraftModel(store, max_tokens=20)
+store = BoundaryDraftStore(max_draft_tokens=28)
+draft_model = LlamaCppBoundaryDraftModel(store, max_tokens=28)
 llama = Llama(
     model_path="YOUR_MODEL.gguf",
     draft_model=draft_model,
@@ -168,7 +168,7 @@ draft_builder = ToolCallDraftBuilder(
     formatter=format_tool_call_draft,
     tokenizer=lambda text: tokenizer.encode(text, add_special_tokens=False),
     boundary_resolver=default_draft_boundary,
-    max_draft_tokens=20,
+    max_draft_tokens=28,
 )
 ```
 

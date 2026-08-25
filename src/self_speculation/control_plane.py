@@ -58,7 +58,7 @@ class CandidateBundleBuilder:
 
     tokenizer: DraftTokenizer
     max_candidates: int = 64
-    max_draft_tokens: int = 20
+    max_draft_tokens: int = 28
     default_format: str = "tagged_json"
 
     def __post_init__(self) -> None:
@@ -176,7 +176,7 @@ class SnapshotForkRunner:
     prompt_renderer: PromptRenderer | None = None
     default_format: str = "tagged_json"
     default_boundary: str = "<tool_call>"
-    max_draft_tokens: int = 20
+    max_draft_tokens: int = 28
 
     def __post_init__(self) -> None:
         if self.max_draft_tokens <= 0:
