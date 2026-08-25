@@ -38,8 +38,8 @@ Moving from K=20 to K=28 offers 12 additional tokens; all 12 match the Actor,
 so rejected work stays at 54 tokens while the target-step proxy saves 10 more
 steps. K=32, 40, 48, and 64 produce no additional proposal or saving on these
 recordings. K=28 is therefore the smallest observed Pareto saturation point and
-replaces 20 as the Pi/control-plane/store default. User configuration and the
-engine's own hard K cap still take precedence.
+replaces 20 as the Pi/control-plane/store/Transformers-engine default. User
+configuration and the engine's own hard K cap still take precedence.
 
 ## Dynamic policy decision
 

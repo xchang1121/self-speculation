@@ -40,6 +40,19 @@ class TransformersEngineTest(unittest.IsolatedAsyncioTestCase):
         )
         cls.model = GPT2LMHeadModel(config).eval()
 
+    def test_default_engine_cap_matches_the_evidence_backed_store_cap(self) -> None:
+        class Tokenizer:
+            pass
+
+        engine = TransformersEngine(
+            self.model,
+            Tokenizer(),
+            draft_store=BoundaryDraftStore(),
+        )
+
+        self.assertEqual(engine.max_draft_tokens, 28)
+        self.assertEqual(engine.max_draft_tokens, engine.draft_store.max_draft_tokens)
+
     async def test_streams_prompt_tokens_and_usage(self) -> None:
         import torch
 

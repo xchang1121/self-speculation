@@ -288,7 +288,7 @@ class TransformersEngine:
         skip_special_tokens: bool = True,
         clean_up_tokenization_spaces: bool = False,
         draft_store: BoundaryDraftStore | None = None,
-        max_draft_tokens: int = 20,
+        max_draft_tokens: int = 28,
         draft_request_predicate: TransformersDraftRequestPredicate | None = None,
         name: str = "transformers",
     ) -> None:
