@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 RECORDING_SHA256 = "da2ca1b8c5851c4ffceb0423602e636b507536b76b9418594fb3fc5273eef0e3"
-TOKENIZER = "unsloth/Qwen3-1.7B-GGUF"
+TOKENIZER_REPOSITORY = "Qwen/Qwen3-1.7B"
 TOKENIZER_REVISION = "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
 MAX_HISTORY = 64
 MAX_BODY_BYTES = 4_096
@@ -210,7 +210,10 @@ def main() -> None:
         raise ValueError(f"recording SHA-256 mismatch: {digest}")
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER, revision=TOKENIZER_REVISION)
+    tokenizer = AutoTokenizer.from_pretrained(
+        TOKENIZER_REPOSITORY,
+        revision=TOKENIZER_REVISION,
+    )
     recording = json.loads(args.recording.read_text(encoding="utf-8"))
     print(json.dumps(analyze(recording, tokenizer), ensure_ascii=False, indent=2))
 

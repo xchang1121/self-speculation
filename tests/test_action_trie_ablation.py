@@ -4,6 +4,7 @@ import unittest
 
 from examples.action_trie_ablation import (
     Occurrence,
+    TOKENIZER_REPOSITORY,
     analyze,
     qwen_body,
     replay_action,
@@ -23,6 +24,9 @@ class ByteTokenizer:
 
 
 class ActionTrieAblationTest(unittest.TestCase):
+    def test_uses_the_frozen_text_tokenizer_repository(self) -> None:
+        self.assertEqual(TOKENIZER_REPOSITORY, "Qwen/Qwen3-1.7B")
+
     def test_frequency_then_recency_and_prefix_budget(self) -> None:
         history = (
             Occurrence((1, 2, 3, 7), 0),
