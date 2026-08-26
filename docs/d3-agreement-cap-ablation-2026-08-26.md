@@ -95,16 +95,6 @@ exactly. Forward counts include the common boundary and post-action sentinel,
 so their absolute value differs from the offline target-step proxy while the
 policy delta remains +3.
 
-## Sensitivity result
-
-A coarse synthetic 3:3:6 exact-first/exact-second/no-exact cohort with every
-wrong tail fixed at 24 tokens did show a 4.02% CPU improvement over 21 repeats.
-That cohort removed 219 proposed tokens and 216 rejected tokens, versus only 15
-and 12 on the real tape shapes. It therefore describes a possible future
-regime, not the present workload. Reconsider agreement clipping only if real
-verification telemetry shows much longer rejected tails, or after a target
-engine supports parallel prefix-tree verification.
-
 ## Reproduction
 
 Run the offline replay:

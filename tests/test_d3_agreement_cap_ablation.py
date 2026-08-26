@@ -8,8 +8,10 @@ from examples.d3_agreement_cap_ablation import (
     simulate_agreement_cap,
 )
 from examples.d3_tape_ablation import DraftOpportunity
-from examples.transformers_agreement_cap_ablation import AgreementReplayStore
-from examples.transformers_agreement_cap_tape_shapes import remap_candidate_shapes
+from examples.transformers_agreement_cap_tape_shapes import (
+    AgreementReplayStore,
+    remap_candidate_shapes,
+)
 
 
 class D3AgreementCapAblationTest(unittest.TestCase):
