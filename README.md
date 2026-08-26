@@ -205,24 +205,10 @@ callback directly; boundary-only integrations reconcile an offer from the next
 target sequence and keep a final unseen offer unresolved.
 
 The candidate builder, boundary store, snapshot fork, and Transformers adapter
-default to an action-draft cap of 28 tokens, the smallest saturation point in
-the [recorded D3 length ablation](docs/d3-draft-length-ablation-2026-08-25.md);
-explicit application and engine caps still take precedence.
-
-The [source-neutral ranking ablation](docs/source-neutral-ranking-ablation-2026-08-25.md)
-also records a rejected target-token prefix-consensus tie-break: it increased
-rejected verifier work without saving an additional target step, so production
-candidate ordering remains unchanged.
-
-The [causal dynamic-cap ablation](docs/d3-dynamic-cap-ablation-2026-08-26.md)
-also rejects a request-level version of Transformers' persistent `+2/-1`
-lookahead heuristic: from K=28 it changed no verifier-work or saved-step metric,
-so production retains the fixed evidence-backed cap.
-
-The [real-Transformers D3 ablation](docs/transformers-d3-real-model-ablation-2026-08-25.md)
-separately verifies the engine path with a pinned tiny model: an exact 28-token
-replay preserves output and reduces target forward calls from 32 to 4. This is
-an integration upper bound, not a live candidate-accuracy claim.
+default to an action-draft cap of 28 tokens; explicit application and engine
+caps still take precedence. Production preserves the submitted candidate order
+and uses a fixed request-scoped cap. Real-model regression tests cover exact
+output preservation through the target verifier.
 
 ### Agent-facing unified control plane
 
