@@ -71,6 +71,12 @@ MAX_TURNS = 6
 MAX_TOKENS_PER_TURN = 512
 SEED = 42
 BOUNDARY = "<tool_call>"
+TOOL_ONLY_PROTOCOL = (
+    "\n\nMock evaluation protocol: continue the investigation and repair through the "
+    "available tools. On every assistant turn, emit exactly one complete tool "
+    "call and no explanatory prose. After each tool result, select the next "
+    "tool call needed for the task."
+)
 
 
 def _sha256_text(value: str) -> str:
@@ -136,6 +142,23 @@ def deterministic_tool_result(call: Mapping[str, Any]) -> str:
             f"arguments_sha256={digest}"
         )
     return f"MOCK_TOOL name={name} arguments_sha256={digest} status=ok"
+
+
+def tool_protocol_messages(
+    messages: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Install the fixed tool-only policy without changing the user task."""
+
+    result = [dict(message) for message in normalize_text_messages(messages)]
+    for index, message in enumerate(result):
+        if message.get("role") != "system":
+            continue
+        result[index] = {
+            **message,
+            "content": str(message.get("content") or "") + TOOL_ONLY_PROTOCOL,
+        }
+        return result
+    return [{"role": "system", "content": TOOL_ONLY_PROTOCOL.strip()}, *result]
 
 
 def _json_type_matches(value: Any, expected: Any) -> bool:
@@ -277,6 +300,7 @@ def frozen_config(*, manifest: Path, tokenizer: Any) -> dict[str, Any]:
         "history_activation": "shortest-unique-prefix",
         "history_formatter": "qwen3-spaced-tagged-json",
         "mock_world": "deterministic-k(a)-v1",
+        "tool_only_protocol_sha256": _sha256_text(TOOL_ONLY_PROTOCOL),
     }
 
 
@@ -285,7 +309,7 @@ def record_case(
     tokenizer: Any,
     case: Mapping[str, Any],
 ) -> dict[str, Any]:
-    messages = normalize_text_messages(case["messages"])
+    messages = tool_protocol_messages(case["messages"])
     tools = [dict(tool) for tool in case["tools"]]
     boundary_tokens = tuple(
         int(token)
@@ -350,6 +374,10 @@ def record_case(
     return {
         "case_id": case.get("case_id"),
         "request_hash": case["request_hash"],
+        "effective_initial_request_hash": _request_hash(
+            tool_protocol_messages(case["messages"]),
+            case["tools"],
+        ),
         "sources": case["sources"],
         "turns": turns,
         "stop_reason": stop_reason,

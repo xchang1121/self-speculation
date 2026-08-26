@@ -11,6 +11,7 @@ from examples.qwen_actor_history_holdout import (
     enabled_tool_call,
     qwen3_tool_body,
     target_body_tokens,
+    tool_protocol_messages,
 )
 
 
@@ -73,6 +74,18 @@ class QwenActorHistoryHoldoutTest(unittest.TestCase):
         self.assertEqual(first, deterministic_tool_result(call("a.txt")))
         self.assertNotEqual(first, deterministic_tool_result(call("b.txt")))
         self.assertIn("a.txt", first)
+
+    def test_adds_the_fixed_tool_policy_without_changing_the_user_task(self) -> None:
+        messages = tool_protocol_messages(
+            (
+                {"role": "system", "content": "base"},
+                {"role": "user", "content": "task"},
+            )
+        )
+
+        self.assertTrue(messages[0]["content"].startswith("base"))
+        self.assertIn("exactly one complete tool call", messages[0]["content"])
+        self.assertEqual(messages[1], {"role": "user", "content": "task"})
 
     def test_validates_enabled_tool_and_top_level_schema(self) -> None:
         self.assertTrue(enabled_tool_call(call("a.txt"), TOOLS))
