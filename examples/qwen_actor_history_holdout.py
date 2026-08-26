@@ -61,6 +61,8 @@ except ImportError:  # direct script execution
 
 RECORDING_FORMAT = "qwen-actor-history-holdout"
 RECORDING_VERSION = 1
+MODEL_REVISION = "90862c4b9d2787eaed51d12237eafdfe7c5f6077"
+LLAMA_BUILD_INFO = "b10615-f280b2698"
 HISTORY_CAP = 3
 MIN_HISTORY_CANDIDATES = 3
 MIN_GENERATED_TOKENS = 1
@@ -282,6 +284,11 @@ def frozen_config(*, manifest: Path, tokenizer: Any) -> dict[str, Any]:
     return {
         "manifest_name": manifest.name,
         "manifest_sha256": _sha256_file(manifest),
+        "model_revision": MODEL_REVISION,
+        "model_quantization": "Q8_0",
+        "llama_build_info": LLAMA_BUILD_INFO,
+        "server_context_tokens": 8_192,
+        "server_slots": 1,
         "tokenizer": DEFAULT_TOKENIZER,
         "tokenizer_revision": DEFAULT_TOKENIZER_REVISION,
         "tokenizer_resolved_revision": tokenizer.init_kwargs.get("_commit_hash"),
@@ -302,6 +309,41 @@ def frozen_config(*, manifest: Path, tokenizer: Any) -> dict[str, Any]:
         "mock_world": "deterministic-k(a)-v1",
         "tool_only_protocol_sha256": _sha256_text(TOOL_ONLY_PROTOCOL),
     }
+
+
+def validate_server_props(props: Mapping[str, Any]) -> dict[str, Any]:
+    settings = props.get("default_generation_settings") or {}
+    if not isinstance(settings, Mapping):
+        raise ValueError("server props omit default_generation_settings")
+    params = settings.get("params") or {}
+    if not isinstance(params, Mapping):
+        raise ValueError("server props omit generation params")
+    model_path = str(props.get("model_path") or "")
+    normalized_path = model_path.replace("\\", "/")
+    expected_revision = f"/snapshots/{MODEL_REVISION}/"
+    observed = {
+        "model_path": model_path,
+        "model_ftype": str(props.get("model_ftype") or ""),
+        "build_info": str(props.get("build_info") or ""),
+        "context_tokens": int(settings.get("n_ctx") or 0),
+        "slots": int(props.get("total_slots") or 0),
+        "native_speculation": str(params.get("speculative.types") or ""),
+    }
+    expected = {
+        "model_ftype": "Q8_0",
+        "build_info": LLAMA_BUILD_INFO,
+        "context_tokens": 8_192,
+        "slots": 1,
+        "native_speculation": "none",
+    }
+    if expected_revision not in normalized_path:
+        raise ValueError("server model revision does not match the frozen holdout")
+    for field, value in expected.items():
+        if observed[field] != value:
+            raise ValueError(
+                f"server {field} is {observed[field]!r}; expected {value!r}"
+            )
+    return observed
 
 
 def record_case(
@@ -616,6 +658,7 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
     completed = {str(case.get("request_hash")) for case in recording["cases"]}
     client = LlamaServerClient(args.server, timeout_s=args.timeout_s)
     recording["runtime"]["health"] = client.health()
+    recording["runtime"]["server"] = validate_server_props(client.props())
     for index, case in enumerate(cases, start=1):
         if case["request_hash"] in completed:
             continue

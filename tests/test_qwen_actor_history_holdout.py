@@ -12,6 +12,7 @@ from examples.qwen_actor_history_holdout import (
     qwen3_tool_body,
     target_body_tokens,
     tool_protocol_messages,
+    validate_server_props,
 )
 
 
@@ -86,6 +87,26 @@ class QwenActorHistoryHoldoutTest(unittest.TestCase):
         self.assertTrue(messages[0]["content"].startswith("base"))
         self.assertIn("exactly one complete tool call", messages[0]["content"])
         self.assertEqual(messages[1], {"role": "user", "content": "task"})
+
+    def test_validates_the_frozen_server_identity(self) -> None:
+        props = {
+            "model_path": (
+                "C:/cache/snapshots/90862c4b9d2787eaed51d12237eafdfe7c5f6077/"
+                "Qwen3-1.7B-Q8_0.gguf"
+            ),
+            "model_ftype": "Q8_0",
+            "build_info": "b10615-f280b2698",
+            "total_slots": 1,
+            "default_generation_settings": {
+                "n_ctx": 8192,
+                "params": {"speculative.types": "none"},
+            },
+        }
+
+        self.assertEqual(validate_server_props(props)["context_tokens"], 8192)
+        props["total_slots"] = 2
+        with self.assertRaisesRegex(ValueError, "slots"):
+            validate_server_props(props)
 
     def test_validates_enabled_tool_and_top_level_schema(self) -> None:
         self.assertTrue(enabled_tool_call(call("a.txt"), TOOLS))

@@ -418,6 +418,14 @@ class LlamaServerClient:
         response.raise_for_status()
         return dict(response.json())
 
+    def props(self) -> dict[str, Any]:
+        response = self._httpx.get(
+            f"{self.base_url}/props",
+            timeout=self.timeout_s,
+        )
+        response.raise_for_status()
+        return dict(response.json())
+
     def stream_main(
         self,
         prompt: str,
