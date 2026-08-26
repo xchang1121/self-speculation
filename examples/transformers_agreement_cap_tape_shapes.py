@@ -232,6 +232,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             drafter_model=args.drafter_model,
             tokenizer=source_tokenizer,
             drafter_width=args.drafter_width,
+            drafter_completion_limit=args.drafter_completion_limit,
         )
     )
     if not opportunities:
@@ -399,6 +400,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "tapes": len(args.tape),
         "opportunities": len(opportunities),
         "drafter_width": args.drafter_width,
+        "drafter_completion_limit": args.drafter_completion_limit,
         "max_draft_tokens": args.max_draft_tokens,
         "repeats": args.repeats,
         "outputs_identical": True,
@@ -417,6 +419,7 @@ def main() -> None:
     parser.add_argument("--source-revision")
     parser.add_argument("--format", default="tagged_json")
     parser.add_argument("--drafter-width", type=int, default=2)
+    parser.add_argument("--drafter-completion-limit", type=int)
     parser.add_argument("--max-draft-tokens", type=int, default=28)
     parser.add_argument(
         "--model",
@@ -429,6 +432,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.drafter_width <= 0:
         parser.error("--drafter-width must be positive")
+    if (
+        args.drafter_completion_limit is not None
+        and args.drafter_completion_limit <= 0
+    ):
+        parser.error("--drafter-completion-limit must be positive")
     if args.max_draft_tokens <= 0:
         parser.error("--max-draft-tokens must be positive")
     if args.repeats <= 0:
