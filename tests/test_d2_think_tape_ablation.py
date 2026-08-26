@@ -143,6 +143,25 @@ class D2ThinkTapeAblationTest(unittest.TestCase):
         self.assertEqual(committed["d1_d2"]["exact_hits"], 0)
         self.assertEqual(committed["d2_oracle_exact_hits"], 1)
 
+    def test_delayed_policy_keeps_an_independent_token_one_d1_control(self) -> None:
+        actual = _call("read", "right.py")
+        turn = _turn(actual, [_probe(actual, 0.95, tokens=5)])
+        turn["d1_probe"] = _probe(_call("read", "wrong.py"), 0.2, tokens=10)
+        result = analyze_recording(
+            {
+                "config": {"phase1_span_tokens": 20},
+                "turns": [turn] * 6,
+            }
+        )
+
+        self.assertEqual(result["d1"]["exact_hits"], 0)
+        self.assertEqual(result["d1"]["probe_tokens"], 60)
+        self.assertEqual(result["d1_d2"]["exact_hits"], 6)
+        self.assertEqual(
+            result["d1_d2"]["efficiency_accounting"]["policy"],
+            "phase1_20_token_early_abort",
+        )
+
     def test_d3_uses_only_parseable_drafts_available_before_the_boundary(self) -> None:
         actual = _call("read", "right.py")
         turn = _turn(

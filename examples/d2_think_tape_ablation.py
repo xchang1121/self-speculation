@@ -495,6 +495,7 @@ def record_case(
     probe_max_tokens: int,
     max_retries: int,
     retry_token_step: int,
+    min_tokens_first_probe: int,
     seed: int,
 ) -> dict[str, Any]:
     main_prompt = tokenizer.apply_chat_template(
@@ -509,12 +510,7 @@ def record_case(
     main["call"] = parse_main_tool_call(main["text"])
     prefixes = _prefixes_from_tokens(tokenizer, main["token_ids"])
 
-    attempts = []
-    snapshot_index = 1 if prefixes else None
-    prior_probe_end_ms = 0.0
-    for retry_index in range(max_retries):
-        if snapshot_index is None or snapshot_index > len(prefixes):
-            break
+    def record_probe(snapshot_index: int, retry_index: int) -> dict[str, Any]:
         observed_prefix = prefixes[snapshot_index - 1]
         snapshot_ms = float(main["token_times_ms"][snapshot_index - 1])
         probe = client.complete_probe(
@@ -522,17 +518,15 @@ def record_case(
             max_tokens=probe_max_tokens,
             seed=seed,
         )
-        probe_call = parse_probe_tool_call(probe["text"])
-        confidence = span_min_probability(probe["selected_logprobs"])
         probe_end_ms = snapshot_ms + float(probe["wall_ms"])
-        attempt = {
+        return {
             "retry_index": retry_index,
             "snapshot_token": snapshot_index,
             "snapshot_ms": snapshot_ms,
             "observed_prefix": observed_prefix,
             "text": probe["text"],
-            "call": probe_call,
-            "confidence": confidence,
+            "call": parse_probe_tool_call(probe["text"]),
+            "confidence": span_min_probability(probe["selected_logprobs"]),
             "wall_ms": probe["wall_ms"],
             "token_ids": probe["token_ids"],
             "token_count": probe["token_count"],
@@ -540,10 +534,25 @@ def record_case(
             "timings": probe["timings"],
             "tokens_cached": probe["tokens_cached"],
             "truncated": probe["truncated"],
-            "optimistic_runway_ms": max(0.0, float(main["wall_ms"]) - probe_end_ms),
+            "optimistic_runway_ms": max(
+                0.0,
+                float(main["wall_ms"]) - probe_end_ms,
+            ),
         }
+
+    attempts = []
+    snapshot_index = (
+        min_tokens_first_probe
+        if min_tokens_first_probe <= len(prefixes)
+        else None
+    )
+    prior_probe_end_ms = 0.0
+    for retry_index in range(max_retries):
+        if snapshot_index is None or snapshot_index > len(prefixes):
+            break
+        attempt = record_probe(snapshot_index, retry_index)
         attempts.append(attempt)
-        prior_probe_end_ms = probe_end_ms
+        prior_probe_end_ms = float(attempt["snapshot_ms"]) + float(attempt["wall_ms"])
         snapshot_index = next_probe_index(
             prefixes,
             main["token_times_ms"],
@@ -551,23 +560,34 @@ def record_case(
             prior_probe_end_ms=prior_probe_end_ms,
             step=retry_token_step,
         )
+    # Record the control last so it cannot evict the main's long prefix before
+    # the delayed policy is measured on a single-slot prefix cache.
+    d1_probe = (
+        record_probe(1, -1)
+        if prefixes and min_tokens_first_probe > 1
+        else None
+    )
 
     return {
         "request_hash": case["request_hash"],
         "sources": case["sources"],
         "reference_calls": case["reference_calls"],
         "main": main,
+        "d1_probe": d1_probe,
         "probes": attempts,
     }
 
 
 def _select_d1(turn: Mapping[str, Any]) -> dict[str, Any]:
     probes = list(turn.get("probes") or [])
-    committed = probes[0] if probes and _normalize_call(probes[0].get("call")) else None
+    first = turn.get("d1_probe")
+    if not isinstance(first, Mapping):
+        first = probes[0] if probes else None
+    committed = first if first and _normalize_call(first.get("call")) else None
     main_call = (turn.get("main") or {}).get("call")
     return {
-        "attempts": min(1, len(probes)),
-        "probe_tokens": int(probes[0].get("token_count") or 0) if probes else 0,
+        "attempts": int(first is not None),
+        "probe_tokens": int(first.get("token_count") or 0) if first else 0,
         "committed": committed,
         "dispatched": committed is not None,
         "exact": bool(committed and exact_call_match(committed.get("call"), main_call)),
@@ -656,8 +676,21 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
     )
     d1_tokens = sum(int(decision["probe_tokens"]) for decision in d1_decisions)
     d2_tokens = sum(int(decision["probe_tokens"]) for decision in d2_decisions)
+    configured_phase1_span = (recording.get("config") or {}).get(
+        "phase1_span_tokens"
+    )
+    phase1_span = (
+        int(configured_phase1_span)
+        if isinstance(configured_phase1_span, int) and configured_phase1_span > 0
+        else 20
+    )
     phase1_early_abort_tokens = sum(
-        _phase1_early_abort_tokens(turn, threshold=threshold) for turn in eligible
+        _phase1_early_abort_tokens(
+            turn,
+            threshold=threshold,
+            span_tokens=phase1_span,
+        )
+        for turn in eligible
     )
     mean_attempts = (
         sum(int(decision["attempts"]) for decision in d2_decisions) / len(eligible)
@@ -665,6 +698,12 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
         else 0.0
     )
     token_ratio = d2_tokens / d1_tokens if d1_tokens else None
+    efficiency_tokens = (
+        phase1_early_abort_tokens
+        if isinstance(configured_phase1_span, int) and configured_phase1_span > 0
+        else d2_tokens
+    )
+    efficiency_token_ratio = efficiency_tokens / d1_tokens if d1_tokens else None
     d1_precision = d1_hits / d1_dispatches if d1_dispatches else 0.0
     d2_precision = d2_hits / d2_dispatches if d2_dispatches else 0.0
     recovered_runways = [
@@ -676,8 +715,8 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
         "recall": d2_hits >= d1_hits and lost == 0 and len(recovered) >= 1,
         "precision": d2_precision >= d1_precision,
         "probe_efficiency": mean_attempts <= 2.0
-        and token_ratio is not None
-        and token_ratio <= 1.75,
+        and efficiency_token_ratio is not None
+        and efficiency_token_ratio <= 1.75,
         "usable_recovery": bool(recovered_runways)
         and all(runway >= 25.0 for runway in recovered_runways),
     }
@@ -700,6 +739,16 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
             "mean_probe_attempts": mean_attempts,
             "probe_tokens": d2_tokens,
             "probe_token_ratio_vs_d1": token_ratio,
+            "efficiency_accounting": {
+                "policy": (
+                    f"phase1_{phase1_span}_token_early_abort"
+                    if isinstance(configured_phase1_span, int)
+                    and configured_phase1_span > 0
+                    else "full_probe"
+                ),
+                "probe_tokens": efficiency_tokens,
+                "probe_token_ratio_vs_d1": efficiency_token_ratio,
+            },
             "phase1_20_token_early_abort": {
                 "probe_tokens": phase1_early_abort_tokens,
                 "probe_token_ratio_vs_d1": (
@@ -744,24 +793,33 @@ def analyze_d3_recording(
         continuation_start = marker_index + len(marker)
         actual = main_tokens[continuation_start:]
         boundary_ms = token_times[marker_index]
-        attempts = []
-        for probe in turn.get("probes") or []:
-            parseable = _normalize_call(probe.get("call")) is not None
+        def boundary_attempt(probe: Mapping[str, Any]) -> dict[str, Any]:
             end_ms = float(probe.get("snapshot_ms") or 0.0) + float(
                 probe.get("wall_ms") or 0.0
             )
-            attempts.append(
-                {
-                    "probe": probe,
-                    "parseable": parseable,
-                    "available": parseable and end_ms <= boundary_ms,
-                    "accepted": _common_prefix_length(
-                        [int(token) for token in probe.get("token_ids") or []],
-                        actual,
-                    ),
-                }
-            )
-        d1 = attempts[0] if attempts and attempts[0]["available"] else None
+            return {
+                "probe": probe,
+                "parseable": _normalize_call(probe.get("call")) is not None,
+                "available": _normalize_call(probe.get("call")) is not None
+                and end_ms <= boundary_ms,
+                "accepted": _common_prefix_length(
+                    [int(token) for token in probe.get("token_ids") or []],
+                    actual,
+                ),
+            }
+
+        attempts = []
+        for probe in turn.get("probes") or []:
+            attempts.append(boundary_attempt(probe))
+        raw_d1_probe = turn.get("d1_probe")
+        if not isinstance(raw_d1_probe, Mapping):
+            raw_d1_probe = (turn.get("probes") or [None])[0]
+        d1_view = (
+            boundary_attempt(raw_d1_probe)
+            if isinstance(raw_d1_probe, Mapping)
+            else None
+        )
+        d1 = d1_view if d1_view and d1_view["available"] else None
         d2_decision = _select_d2(turn, threshold)
         considered = attempts[: int(d2_decision["attempts"])]
         d2_available = [attempt for attempt in considered if attempt["available"]]
@@ -867,6 +925,8 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
         "probe_max_tokens": args.probe_max_tokens,
         "max_retries": args.max_retries,
         "retry_token_step": args.retry_token_step,
+        "min_tokens_first_probe": args.min_tokens_first_probe,
+        "phase1_span_tokens": args.phase1_span_tokens,
         "confidence_threshold": args.confidence_threshold,
         "seed": args.seed,
     }
@@ -900,6 +960,7 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
                     probe_max_tokens=args.probe_max_tokens,
                     max_retries=args.max_retries,
                     retry_token_step=args.retry_token_step,
+                    min_tokens_first_probe=args.min_tokens_first_probe,
                     seed=args.seed,
                 )
             except Exception as error:  # keep long-running recordings resumable
@@ -944,6 +1005,8 @@ def _build_parser() -> argparse.ArgumentParser:
     record.add_argument("--probe-max-tokens", type=int, default=100)
     record.add_argument("--max-retries", type=int, default=5)
     record.add_argument("--retry-token-step", type=int, default=50)
+    record.add_argument("--min-tokens-first-probe", type=int, default=1)
+    record.add_argument("--phase1-span-tokens", type=int)
     record.add_argument("--confidence-threshold", type=float, default=0.90)
     record.add_argument("--seed", type=int, default=42)
     record.add_argument("--timeout-s", type=float, default=600.0)
@@ -967,8 +1030,11 @@ def main() -> None:
             args.probe_max_tokens,
             args.max_retries,
             args.retry_token_step,
+            args.min_tokens_first_probe,
         ) <= 0:
             raise SystemExit("token limits, retries, and retry step must be positive")
+        if args.phase1_span_tokens is not None and args.phase1_span_tokens <= 0:
+            raise SystemExit("--phase1-span-tokens must be positive when provided")
         recording = _record(args)
         result = {
             "output": str(args.output),
