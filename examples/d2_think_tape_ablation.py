@@ -281,6 +281,72 @@ def load_actor_cases(
     return list(cases_by_hash.values()), tape_metadata
 
 
+def load_case_manifest(
+    path: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load model-output-free action cases with integrity-checked requests."""
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping):
+        raise ValueError("case manifest must be a JSON object")
+    if raw.get("format") != "self-speculation-action-case-manifest":
+        raise ValueError("unsupported case manifest format")
+    if raw.get("version") != 1:
+        raise ValueError("unsupported case manifest version")
+    raw_cases = raw.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("case manifest must contain at least one case")
+
+    cases = []
+    seen_hashes: set[str] = set()
+    for index, value in enumerate(raw_cases):
+        if not isinstance(value, Mapping):
+            raise ValueError(f"case manifest entry {index} must be an object")
+        messages = value.get("messages")
+        tools = value.get("tools")
+        if not isinstance(messages, list) or not isinstance(tools, list):
+            raise ValueError(f"case manifest entry {index} has invalid messages/tools")
+        expected_hash = str(value.get("request_hash") or "")
+        actual_hash = _request_hash(messages, tools)
+        if expected_hash != actual_hash:
+            raise ValueError(f"case manifest entry {index} request hash mismatch")
+        if actual_hash in seen_hashes:
+            raise ValueError(f"case manifest entry {index} duplicates a request")
+        seen_hashes.add(actual_hash)
+        raw_references = value.get("reference_calls") or []
+        if not isinstance(raw_references, list):
+            raise ValueError(f"case manifest entry {index} has invalid references")
+        references = [
+            normalized
+            for reference in raw_references
+            if (normalized := _normalize_call(reference)) is not None
+        ]
+        sources = value.get("sources")
+        if not isinstance(sources, list) or not all(
+            isinstance(source, Mapping) for source in sources
+        ):
+            raise ValueError(f"case manifest entry {index} has invalid sources")
+        case = {
+            "request_hash": actual_hash,
+            "messages": messages,
+            "tools": tools,
+            "reference_calls": references,
+            "sources": sources,
+        }
+        case_id = value.get("case_id")
+        if isinstance(case_id, str) and case_id:
+            case["case_id"] = case_id
+        cases.append(case)
+
+    return cases, [
+        {
+            "name": path.name,
+            "sha256": _sha256_file(path),
+            "format": str(raw["format"]),
+        }
+    ]
+
+
 def _sentence_boundary(text: str) -> bool:
     return bool(text) and (
         text.endswith("\n") or text.endswith(". ") or text.endswith(".\n")
@@ -486,6 +552,22 @@ def _repair_main_tokens(
     main["token_times_ms"] = token_times
 
 
+def _probe_confident(probe: Mapping[str, Any], threshold: float) -> bool:
+    confidence = probe.get("confidence")
+    return (
+        isinstance(confidence, (int, float))
+        and math.isfinite(confidence)
+        and confidence >= threshold
+    )
+
+
+def _probe_committable(probe: Mapping[str, Any], threshold: float) -> bool:
+    return (
+        _normalize_call(probe.get("call")) is not None
+        and _probe_confident(probe, threshold)
+    )
+
+
 def record_case(
     client: LlamaServerClient,
     tokenizer: Any,
@@ -497,6 +579,8 @@ def record_case(
     retry_token_step: int,
     min_tokens_first_probe: int,
     seed: int,
+    stop_after_confident_probe: bool = False,
+    confidence_threshold: float = 0.90,
 ) -> dict[str, Any]:
     main_prompt = tokenizer.apply_chat_template(
         normalize_text_messages(case["messages"]),
@@ -553,6 +637,11 @@ def record_case(
         attempt = record_probe(snapshot_index, retry_index)
         attempts.append(attempt)
         prior_probe_end_ms = float(attempt["snapshot_ms"]) + float(attempt["wall_ms"])
+        if stop_after_confident_probe and _probe_committable(
+            attempt,
+            confidence_threshold,
+        ):
+            break
         snapshot_index = next_probe_index(
             prefixes,
             main["token_times_ms"],
@@ -568,7 +657,7 @@ def record_case(
         else None
     )
 
-    return {
+    result = {
         "request_hash": case["request_hash"],
         "sources": case["sources"],
         "reference_calls": case["reference_calls"],
@@ -576,6 +665,9 @@ def record_case(
         "d1_probe": d1_probe,
         "probes": attempts,
     }
+    if isinstance(case.get("case_id"), str):
+        result["case_id"] = case["case_id"]
+    return result
 
 
 def _select_d1(turn: Mapping[str, Any]) -> dict[str, Any]:
@@ -602,13 +694,7 @@ def _select_d2(turn: Mapping[str, Any], threshold: float) -> dict[str, Any]:
     for probe in probes:
         attempts += 1
         probe_tokens += int(probe.get("token_count") or 0)
-        confidence = probe.get("confidence")
-        if (
-            _normalize_call(probe.get("call")) is not None
-            and isinstance(confidence, (int, float))
-            and math.isfinite(confidence)
-            and confidence >= threshold
-        ):
+        if _probe_committable(probe, threshold):
             committed = probe
             break
     main_call = (turn.get("main") or {}).get("call")
@@ -626,24 +712,25 @@ def _phase1_early_abort_tokens(
     *,
     threshold: float,
     span_tokens: int = 20,
+    first_probe_full: bool = False,
 ) -> int:
     decision = _select_d2(turn, threshold)
     probes = list(turn.get("probes") or [])[: int(decision["attempts"])]
     total = 0
-    for probe in probes:
+    for index, probe in enumerate(probes):
         full_tokens = int(probe.get("token_count") or 0)
-        confidence = probe.get("confidence")
-        passes = (
-            isinstance(confidence, (int, float))
-            and math.isfinite(confidence)
-            and confidence >= threshold
+        total += (
+            full_tokens
+            if (first_probe_full and index == 0)
+            or _probe_confident(probe, threshold)
+            else min(span_tokens, full_tokens)
         )
-        total += full_tokens if passes else min(span_tokens, full_tokens)
     return total
 
 
 def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) -> dict[str, Any]:
     turns = list(recording.get("turns") or [])
+    config = recording.get("config") or {}
     eligible = [turn for turn in turns if _normalize_call((turn.get("main") or {}).get("call"))]
     d1_decisions = [_select_d1(turn) for turn in eligible]
     d2_decisions = [_select_d2(turn, threshold) for turn in eligible]
@@ -676,9 +763,7 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
     )
     d1_tokens = sum(int(decision["probe_tokens"]) for decision in d1_decisions)
     d2_tokens = sum(int(decision["probe_tokens"]) for decision in d2_decisions)
-    configured_phase1_span = (recording.get("config") or {}).get(
-        "phase1_span_tokens"
-    )
+    configured_phase1_span = config.get("phase1_span_tokens")
     phase1_span = (
         int(configured_phase1_span)
         if isinstance(configured_phase1_span, int) and configured_phase1_span > 0
@@ -689,6 +774,7 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
             turn,
             threshold=threshold,
             span_tokens=phase1_span,
+            first_probe_full=bool(config.get("phase1_first_probe_full")),
         )
         for turn in eligible
     )
@@ -710,13 +796,15 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
         float((decision.get("committed") or {}).get("optimistic_runway_ms") or 0.0)
         for _, decision in recovered
     ]
+    max_mean_attempts = float(config.get("gate_max_mean_probe_attempts") or 2.0)
+    max_token_ratio = float(config.get("gate_max_probe_token_ratio") or 1.75)
     gates = {
         "validity": len(eligible) >= 6,
         "recall": d2_hits >= d1_hits and lost == 0 and len(recovered) >= 1,
         "precision": d2_precision >= d1_precision,
-        "probe_efficiency": mean_attempts <= 2.0
+        "probe_efficiency": mean_attempts <= max_mean_attempts
         and efficiency_token_ratio is not None
-        and efficiency_token_ratio <= 1.75,
+        and efficiency_token_ratio <= max_token_ratio,
         "usable_recovery": bool(recovered_runways)
         and all(runway >= 25.0 for runway in recovered_runways),
     }
@@ -741,13 +829,19 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
             "probe_token_ratio_vs_d1": token_ratio,
             "efficiency_accounting": {
                 "policy": (
-                    f"phase1_{phase1_span}_token_early_abort"
+                    (
+                        f"d1_full_plus_d2_phase1_{phase1_span}_token_early_abort"
+                        if config.get("phase1_first_probe_full")
+                        else f"phase1_{phase1_span}_token_early_abort"
+                    )
                     if isinstance(configured_phase1_span, int)
                     and configured_phase1_span > 0
                     else "full_probe"
                 ),
                 "probe_tokens": efficiency_tokens,
                 "probe_token_ratio_vs_d1": efficiency_token_ratio,
+                "gate_max_mean_probe_attempts": max_mean_attempts,
+                "gate_max_probe_token_ratio": max_token_ratio,
             },
             "phase1_20_token_early_abort": {
                 "probe_tokens": phase1_early_abort_tokens,
@@ -762,6 +856,40 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
         "d2_oracle_exact_hits": oracle_hits,
         "gates": gates,
         "product_gate_passed": all(gates.values()),
+    }
+
+
+def _simulate_serial_bundle(
+    actual: Sequence[int],
+    candidates: Sequence[Sequence[int]],
+    *,
+    limit: int,
+) -> dict[str, int]:
+    """Simulate the existing serial target-verifier fallback contract."""
+
+    generated = 0
+    proposals = 0
+    proposed_tokens = 0
+    accepted_tokens = 0
+    for full_candidate in candidates:
+        candidate = tuple(int(token) for token in full_candidate[:limit])
+        if generated > len(candidate) or tuple(actual[:generated]) != candidate[:generated]:
+            continue
+        proposal = candidate[generated:]
+        if not proposal or generated >= len(actual):
+            continue
+        accepted = _common_prefix_length(proposal, actual[generated:])
+        proposals += 1
+        proposed_tokens += len(proposal)
+        accepted_tokens += accepted
+        generated += accepted
+        if generated < len(actual):
+            generated += 1
+    return {
+        "target_steps": proposals + max(0, len(actual) - generated),
+        "proposals": proposals,
+        "proposed_tokens": proposed_tokens,
+        "accepted_tokens": accepted_tokens,
     }
 
 
@@ -793,19 +921,19 @@ def analyze_d3_recording(
         continuation_start = marker_index + len(marker)
         actual = main_tokens[continuation_start:]
         boundary_ms = token_times[marker_index]
+
         def boundary_attempt(probe: Mapping[str, Any]) -> dict[str, Any]:
             end_ms = float(probe.get("snapshot_ms") or 0.0) + float(
                 probe.get("wall_ms") or 0.0
             )
+            call = _normalize_call(probe.get("call"))
+            tokens = [int(token) for token in probe.get("token_ids") or []]
             return {
                 "probe": probe,
-                "parseable": _normalize_call(probe.get("call")) is not None,
-                "available": _normalize_call(probe.get("call")) is not None
-                and end_ms <= boundary_ms,
-                "accepted": _common_prefix_length(
-                    [int(token) for token in probe.get("token_ids") or []],
-                    actual,
-                ),
+                "parseable": call is not None,
+                "available": call is not None and end_ms <= boundary_ms,
+                "tokens": tokens,
+                "accepted": _common_prefix_length(tokens, actual),
             }
 
         attempts = []
@@ -824,6 +952,22 @@ def analyze_d3_recording(
         considered = attempts[: int(d2_decision["attempts"])]
         d2_available = [attempt for attempt in considered if attempt["available"]]
         d2 = d2_available[-1] if d2_available else None
+        committed_probe = d2_decision.get("committed")
+        committed_view = (
+            boundary_attempt(committed_probe)
+            if isinstance(committed_probe, Mapping)
+            else None
+        )
+        bundle_candidates = []
+        for view in (committed_view, d1):
+            if not view or not view["available"]:
+                continue
+            candidate = tuple(view["tokens"])
+            if candidate and candidate not in bundle_candidates:
+                bundle_candidates.append(candidate)
+        d1_candidates = [tuple(d1["tokens"])] if d1 else []
+        d1_serial = _simulate_serial_bundle(actual, d1_candidates, limit=28)
+        bundle_serial = _simulate_serial_bundle(actual, bundle_candidates, limit=28)
         all_available = [attempt for attempt in attempts if attempt["available"]]
         latest = all_available[-1] if all_available else None
         rows.append(
@@ -840,6 +984,8 @@ def analyze_d3_recording(
                     int(attempt["probe"].get("token_count") or 0)
                     for attempt in attempts
                 ),
+                "d1_serial": d1_serial,
+                "bundle_serial": bundle_serial,
             }
         )
     d2_summary = analyze_recording(recording, threshold=threshold)
@@ -852,6 +998,22 @@ def analyze_d3_recording(
     phase1_probe_tokens = int(
         d2_summary["d1_d2"]["phase1_20_token_early_abort"]["probe_tokens"]
     )
+    d1_serial = {
+        key: sum(row["d1_serial"][key] for row in rows)
+        for key in ("target_steps", "proposals", "proposed_tokens", "accepted_tokens")
+    }
+    bundle_serial = {
+        key: sum(row["bundle_serial"][key] for row in rows)
+        for key in ("target_steps", "proposals", "proposed_tokens", "accepted_tokens")
+    }
+    bundle_gates = {
+        "accepted_tokens_no_regression": (
+            bundle_serial["accepted_tokens"] >= d1_serial["accepted_tokens"]
+        ),
+        "target_steps_no_regression": (
+            bundle_serial["target_steps"] <= d1_serial["target_steps"]
+        ),
+    }
     return {
         "tool_turns_with_token_boundary": len(rows),
         "tool_continuation_tokens": sum(row["continuation_tokens"] for row in rows),
@@ -886,7 +1048,29 @@ def analyze_d3_recording(
         "available_parseable_oracle": {
             "accepted_target_tokens": sum(row["oracle_accepted"] for row in rows),
         },
+        "bounded_d2_then_d1_bundle_k28": {
+            "d1": d1_serial,
+            "d1_d2": bundle_serial,
+            "gates": bundle_gates,
+            "passed": all(bundle_gates.values()),
+        },
     }
+
+
+def _attach_d3_analysis(
+    result: dict[str, Any],
+    recording: Mapping[str, Any],
+    tokenizer: Any,
+    *,
+    threshold: float,
+) -> None:
+    d3 = analyze_d3_recording(recording, tokenizer, threshold=threshold)
+    result["d3_boundary_reuse"] = d3
+    if not (recording.get("config") or {}).get("require_d3_bundle_gate"):
+        return
+    passed = bool(d3["bounded_d2_then_d1_bundle_k28"]["passed"])
+    result["gates"]["d3_bundle_no_regression"] = passed
+    result["product_gate_passed"] = all(bool(value) for value in result["gates"].values())
 
 
 def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
@@ -909,11 +1093,19 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.revision)
-    cases, tapes = load_actor_cases(args.tape, actor_model=args.actor_model)
+    if args.case_manifest is not None:
+        cases, tapes = load_case_manifest(args.case_manifest)
+    else:
+        cases, tapes = load_actor_cases(args.tape, actor_model=args.actor_model)
     if args.limit is not None:
         cases = cases[: args.limit]
     client = LlamaServerClient(args.server_url, timeout_s=args.timeout_s)
     client.health()
+    record_stop_threshold = (
+        args.record_stop_confidence_threshold
+        if args.record_stop_confidence_threshold is not None
+        else args.confidence_threshold
+    )
     config = {
         "actor_model": args.actor_model,
         "tokenizer": args.tokenizer,
@@ -930,6 +1122,17 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
         "confidence_threshold": args.confidence_threshold,
         "seed": args.seed,
     }
+    if args.stop_after_confident_probe:
+        config["stop_after_confident_probe"] = True
+        config["record_stop_confidence_threshold"] = record_stop_threshold
+    if args.phase1_first_probe_full:
+        config["phase1_first_probe_full"] = True
+    if args.gate_max_mean_probe_attempts != 2.0:
+        config["gate_max_mean_probe_attempts"] = args.gate_max_mean_probe_attempts
+    if args.gate_max_probe_token_ratio != 1.75:
+        config["gate_max_probe_token_ratio"] = args.gate_max_probe_token_ratio
+    if args.require_d3_bundle_gate:
+        config["require_d3_bundle_gate"] = True
     existing_by_hash: dict[str, dict[str, Any]] = {}
     if args.resume and args.output.exists():
         existing = json.loads(args.output.read_text(encoding="utf-8"))
@@ -961,6 +1164,8 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
                     max_retries=args.max_retries,
                     retry_token_step=args.retry_token_step,
                     min_tokens_first_probe=args.min_tokens_first_probe,
+                    stop_after_confident_probe=args.stop_after_confident_probe,
+                    confidence_threshold=record_stop_threshold,
                     seed=args.seed,
                 )
             except Exception as error:  # keep long-running recordings resumable
@@ -972,6 +1177,8 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
                     "main": {},
                     "probes": [],
                 }
+                if isinstance(case.get("case_id"), str):
+                    turn["case_id"] = case["case_id"]
         recording["turns"].append(turn)
         recording["analysis"] = analyze_recording(
             recording, threshold=args.confidence_threshold
@@ -981,6 +1188,13 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
         str(threshold): analyze_recording(recording, threshold=threshold)
         for threshold in (0.85, 0.90, 0.95)
     }
+    if args.require_d3_bundle_gate:
+        _attach_d3_analysis(
+            recording["analysis"],
+            recording,
+            tokenizer,
+            threshold=args.confidence_threshold,
+        )
     _write_json_atomic(args.output, recording)
     return recording
 
@@ -989,7 +1203,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     record = subparsers.add_parser("record")
-    record.add_argument("--tape", type=Path, action="append", required=True)
+    inputs = record.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--tape", type=Path, action="append")
+    inputs.add_argument("--case-manifest", type=Path)
     record.add_argument("--output", type=Path, required=True)
     record.add_argument("--server-url", default="http://127.0.0.1:18080")
     record.add_argument("--actor-model", default="deepseek-v4-pro")
@@ -1006,8 +1222,14 @@ def _build_parser() -> argparse.ArgumentParser:
     record.add_argument("--max-retries", type=int, default=5)
     record.add_argument("--retry-token-step", type=int, default=50)
     record.add_argument("--min-tokens-first-probe", type=int, default=1)
+    record.add_argument("--stop-after-confident-probe", action="store_true")
+    record.add_argument("--record-stop-confidence-threshold", type=float)
     record.add_argument("--phase1-span-tokens", type=int)
+    record.add_argument("--phase1-first-probe-full", action="store_true")
     record.add_argument("--confidence-threshold", type=float, default=0.90)
+    record.add_argument("--gate-max-mean-probe-attempts", type=float, default=2.0)
+    record.add_argument("--gate-max-probe-token-ratio", type=float, default=1.75)
+    record.add_argument("--require-d3-bundle-gate", action="store_true")
     record.add_argument("--seed", type=int, default=42)
     record.add_argument("--timeout-s", type=float, default=600.0)
     record.add_argument("--limit", type=int)
@@ -1035,6 +1257,33 @@ def main() -> None:
             raise SystemExit("token limits, retries, and retry step must be positive")
         if args.phase1_span_tokens is not None and args.phase1_span_tokens <= 0:
             raise SystemExit("--phase1-span-tokens must be positive when provided")
+        if args.phase1_first_probe_full and args.phase1_span_tokens is None:
+            raise SystemExit("--phase1-first-probe-full requires --phase1-span-tokens")
+        if not 0.0 < args.confidence_threshold <= 1.0:
+            raise SystemExit("--confidence-threshold must be in (0, 1]")
+        if args.record_stop_confidence_threshold is not None and not (
+            0.0 < args.record_stop_confidence_threshold <= 1.0
+        ):
+            raise SystemExit("--record-stop-confidence-threshold must be in (0, 1]")
+        if (
+            args.record_stop_confidence_threshold is not None
+            and not args.stop_after_confident_probe
+        ):
+            raise SystemExit(
+                "--record-stop-confidence-threshold requires "
+                "--stop-after-confident-probe"
+            )
+        if min(
+            args.gate_max_mean_probe_attempts,
+            args.gate_max_probe_token_ratio,
+        ) <= 0 or not all(
+            math.isfinite(value)
+            for value in (
+                args.gate_max_mean_probe_attempts,
+                args.gate_max_probe_token_ratio,
+            )
+        ):
+            raise SystemExit("efficiency gate limits must be positive")
         recording = _record(args)
         result = {
             "output": str(args.output),
@@ -1054,7 +1303,8 @@ def main() -> None:
                 args.tokenizer,
                 revision=args.revision,
             )
-            result["d3_boundary_reuse"] = analyze_d3_recording(
+            _attach_d3_analysis(
+                result,
                 recording,
                 tokenizer,
                 threshold=args.confidence_threshold,
