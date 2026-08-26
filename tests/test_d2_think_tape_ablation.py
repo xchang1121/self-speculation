@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from examples.d2_think_tape_ablation import (
+    _estimated_probe_prefix_wall_ms,
     _request_hash,
     analyze_d3_recording,
     analyze_recording,
@@ -49,6 +50,19 @@ def _turn(main: dict, probes: list[dict]) -> dict:
 
 
 class D2ThinkTapeAblationTest(unittest.TestCase):
+    def test_estimates_probe_prefix_wall_without_discarding_fixed_cost(self) -> None:
+        probe = {
+            "wall_ms": 120.0,
+            "token_count": 100,
+            "timings": {"predicted_ms": 100.0, "predicted_n": 100},
+        }
+
+        self.assertEqual(_estimated_probe_prefix_wall_ms(probe, 20), 40.0)
+        self.assertEqual(
+            _estimated_probe_prefix_wall_ms({**probe, "timings": {}}, 20),
+            120.0,
+        )
+
     def test_loads_integrity_checked_case_manifest(self) -> None:
         messages = [{"role": "user", "content": "inspect"}]
         tools = [{"type": "function", "function": {"name": "read"}}]
@@ -354,6 +368,69 @@ class D2ThinkTapeAblationTest(unittest.TestCase):
         turn["probes"][1]["token_ids"] = [1, 9, 9, 9]
         regressed = analyze_d3_recording({"turns": [turn]}, MarkerTokenizer())
         self.assertFalse(regressed["bounded_d2_then_d1_bundle_k28"]["passed"])
+
+    def test_d3_reuses_unparseable_phase1_tokens_only_after_policy_retry(self) -> None:
+        actual = _call("read", "right.py")
+        turns = []
+        for _ in range(6):
+            turn = _turn(
+                actual,
+                [
+                    {
+                        **_probe(_call("read", "wrong.py"), 0.4, tokens=4),
+                        "token_ids": [1, 9, 9, 9],
+                        "snapshot_ms": 1.0,
+                        "wall_ms": 1.0,
+                    },
+                    {
+                        **_probe(None, 0.4, tokens=4),
+                        "token_ids": [1, 2, 3, 4],
+                        "snapshot_ms": 2.0,
+                        "wall_ms": 1.0,
+                    },
+                ],
+            )
+            turn["main"].update(
+                {
+                    "token_ids": [7, 8, 1, 2, 3, 4],
+                    "token_times_ms": [10.0] * 6,
+                }
+            )
+            turns.append(turn)
+
+        result = analyze_d3_recording(
+            {
+                "config": {
+                    "phase1_span_tokens": 20,
+                    "phase1_first_probe_full": True,
+                },
+                "turns": turns,
+            },
+            MarkerTokenizer(),
+        )
+        reuse = result["low_confidence_phase1_draft_reuse_k28"]
+
+        self.assertEqual(reuse["eligible_policy_turns"], 6)
+        self.assertEqual(reuse["available_before_boundary"], 6)
+        self.assertLess(
+            reuse["d1_then_phase1"]["target_steps"],
+            reuse["d1"]["target_steps"],
+        )
+        self.assertEqual(reuse["per_turn_target_step_regressions"], 0)
+        self.assertFalse(reuse["passed"])
+
+        turns[0]["probes"][0]["confidence"] = 0.95
+        no_retry = analyze_d3_recording(
+            {
+                "config": {
+                    "phase1_span_tokens": 20,
+                    "phase1_first_probe_full": True,
+                },
+                "turns": turns,
+            },
+            MarkerTokenizer(),
+        )["low_confidence_phase1_draft_reuse_k28"]
+        self.assertEqual(no_retry["eligible_policy_turns"], 5)
 
 
 class MarkerTokenizer:

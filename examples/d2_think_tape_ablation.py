@@ -893,6 +893,29 @@ def _simulate_serial_bundle(
     }
 
 
+def _estimated_probe_prefix_wall_ms(
+    probe: Mapping[str, Any],
+    prefix_tokens: int,
+) -> float:
+    """Conservatively remove only generation after a retained probe prefix."""
+
+    wall_ms = max(0.0, float(probe.get("wall_ms") or 0.0))
+    token_count = int(probe.get("token_count") or 0)
+    if token_count <= prefix_tokens:
+        return wall_ms
+    timings = probe.get("timings") or {}
+    predicted_ms = float(timings.get("predicted_ms") or 0.0)
+    predicted_tokens = int(timings.get("predicted_n") or token_count)
+    if predicted_ms <= 0.0 or predicted_tokens <= 0:
+        return wall_ms
+    retained = min(prefix_tokens, predicted_tokens)
+    non_generation_ms = max(0.0, wall_ms - predicted_ms)
+    return min(
+        wall_ms,
+        non_generation_ms + predicted_ms * retained / predicted_tokens,
+    )
+
+
 def analyze_d3_recording(
     recording: Mapping[str, Any],
     tokenizer: Any,
@@ -901,6 +924,16 @@ def analyze_d3_recording(
 ) -> dict[str, Any]:
     """Measure boundary-draft reuse from recorded D1/D2 probe continuations."""
 
+    config = recording.get("config") or {}
+    configured_phase1_span = config.get("phase1_span_tokens")
+    phase1_span = (
+        int(configured_phase1_span)
+        if isinstance(configured_phase1_span, int) and configured_phase1_span > 0
+        else 20
+    )
+    phase1_reuse_enabled = bool(config.get("phase1_first_probe_full")) and (
+        isinstance(configured_phase1_span, int) and configured_phase1_span > 0
+    )
     marker = [
         int(token)
         for token in tokenizer.encode(
@@ -936,12 +969,13 @@ def analyze_d3_recording(
                 "accepted": _common_prefix_length(tokens, actual),
             }
 
+        probes = list(turn.get("probes") or [])
         attempts = []
-        for probe in turn.get("probes") or []:
+        for probe in probes:
             attempts.append(boundary_attempt(probe))
         raw_d1_probe = turn.get("d1_probe")
         if not isinstance(raw_d1_probe, Mapping):
-            raw_d1_probe = (turn.get("probes") or [None])[0]
+            raw_d1_probe = (probes or [None])[0]
         d1_view = (
             boundary_attempt(raw_d1_probe)
             if isinstance(raw_d1_probe, Mapping)
@@ -968,6 +1002,39 @@ def analyze_d3_recording(
         d1_candidates = [tuple(d1["tokens"])] if d1 else []
         d1_serial = _simulate_serial_bundle(actual, d1_candidates, limit=28)
         bundle_serial = _simulate_serial_bundle(actual, bundle_candidates, limit=28)
+        phase1_attempted = phase1_reuse_enabled and int(d2_decision["attempts"]) >= 2
+        phase1_probe = probes[1] if phase1_attempted and len(probes) >= 2 else None
+        phase1_tokens = (
+            tuple(int(token) for token in phase1_probe.get("token_ids") or [])[
+                :phase1_span
+            ]
+            if phase1_probe is not None
+            else ()
+        )
+        phase1_end_ms = (
+            float(phase1_probe.get("snapshot_ms") or 0.0)
+            + _estimated_probe_prefix_wall_ms(phase1_probe, phase1_span)
+            if phase1_probe is not None
+            else math.inf
+        )
+        phase1_available = bool(phase1_tokens) and phase1_end_ms <= boundary_ms
+        d1_then_phase1_candidates = list(d1_candidates)
+        if phase1_available and phase1_tokens not in d1_then_phase1_candidates:
+            d1_then_phase1_candidates.append(phase1_tokens)
+        phase1_then_d1_candidates = [phase1_tokens] if phase1_available else []
+        for candidate in d1_candidates:
+            if candidate not in phase1_then_d1_candidates:
+                phase1_then_d1_candidates.append(candidate)
+        d1_then_phase1_serial = _simulate_serial_bundle(
+            actual,
+            d1_then_phase1_candidates,
+            limit=28,
+        )
+        phase1_then_d1_serial = _simulate_serial_bundle(
+            actual,
+            phase1_then_d1_candidates,
+            limit=28,
+        )
         all_available = [attempt for attempt in attempts if attempt["available"]]
         latest = all_available[-1] if all_available else None
         rows.append(
@@ -986,6 +1053,18 @@ def analyze_d3_recording(
                 ),
                 "d1_serial": d1_serial,
                 "bundle_serial": bundle_serial,
+                "phase1_attempted": phase1_attempted,
+                "phase1_available": phase1_available,
+                "phase1_probe_tokens": (
+                    min(
+                        phase1_span,
+                        int(phase1_probe.get("token_count") or len(phase1_tokens)),
+                    )
+                    if phase1_probe is not None
+                    else 0
+                ),
+                "d1_then_phase1_serial": d1_then_phase1_serial,
+                "phase1_then_d1_serial": phase1_then_d1_serial,
             }
         )
     d2_summary = analyze_recording(recording, threshold=threshold)
@@ -1012,6 +1091,55 @@ def analyze_d3_recording(
         ),
         "target_steps_no_regression": (
             bundle_serial["target_steps"] <= d1_serial["target_steps"]
+        ),
+    }
+    phase1_rows = [row for row in rows if row["phase1_attempted"]]
+
+    def aggregate_serial(
+        selected_rows: Sequence[Mapping[str, Any]],
+        key: str,
+    ) -> dict[str, int]:
+        return {
+            metric: sum(int(row[key][metric]) for row in selected_rows)
+            for metric in (
+                "target_steps",
+                "proposals",
+                "proposed_tokens",
+                "accepted_tokens",
+            )
+        }
+
+    phase1_d1 = aggregate_serial(phase1_rows, "d1_serial")
+    d1_then_phase1 = aggregate_serial(phase1_rows, "d1_then_phase1_serial")
+    phase1_then_d1 = aggregate_serial(phase1_rows, "phase1_then_d1_serial")
+    phase1_probe_tokens = sum(int(row["phase1_probe_tokens"]) for row in phase1_rows)
+    target_steps_saved = phase1_d1["target_steps"] - d1_then_phase1["target_steps"]
+    probe_tokens_per_saved_step = (
+        phase1_probe_tokens / target_steps_saved if target_steps_saved > 0 else None
+    )
+    baseline_proposed_tokens = phase1_d1["proposed_tokens"]
+    proposed_token_ratio = (
+        d1_then_phase1["proposed_tokens"] / baseline_proposed_tokens
+        if baseline_proposed_tokens
+        else None
+    )
+    per_turn_regressions = sum(
+        row["d1_then_phase1_serial"]["target_steps"]
+        > row["d1_serial"]["target_steps"]
+        for row in phase1_rows
+    )
+    phase1_reuse_gates = {
+        "validity": len(phase1_rows) >= 6,
+        "target_steps_no_regression": per_turn_regressions == 0,
+        "target_step_gain": target_steps_saved > 0,
+        "compute_neutrality": (
+            probe_tokens_per_saved_step is not None
+            and probe_tokens_per_saved_step <= 1.0
+        ),
+        "proposal_cost": (
+            d1_then_phase1["proposed_tokens"] == 0
+            if baseline_proposed_tokens == 0
+            else proposed_token_ratio is not None and proposed_token_ratio <= 1.25
         ),
     }
     return {
@@ -1053,6 +1181,25 @@ def analyze_d3_recording(
             "d1_d2": bundle_serial,
             "gates": bundle_gates,
             "passed": all(bundle_gates.values()),
+        },
+        "low_confidence_phase1_draft_reuse_k28": {
+            "enabled_by_recording": phase1_reuse_enabled,
+            "eligible_policy_turns": len(phase1_rows),
+            "available_before_boundary": sum(
+                bool(row["phase1_available"]) for row in phase1_rows
+            ),
+            "phase1_probe_tokens": phase1_probe_tokens,
+            "d1": phase1_d1,
+            "d1_then_phase1": d1_then_phase1,
+            "phase1_then_d1": phase1_then_d1,
+            "target_steps_saved": target_steps_saved,
+            "phase1_probe_tokens_per_target_step_saved": (
+                probe_tokens_per_saved_step
+            ),
+            "d1_then_phase1_proposed_token_ratio": proposed_token_ratio,
+            "per_turn_target_step_regressions": per_turn_regressions,
+            "gates": phase1_reuse_gates,
+            "passed": all(phase1_reuse_gates.values()),
         },
     }
 
