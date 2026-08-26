@@ -219,12 +219,18 @@ def build_opportunities(
     actor_model: str,
     drafter_model: str,
     tokenizer: Any,
+    drafter_width: int | None = None,
 ) -> tuple[DraftOpportunity, ...]:
+    if drafter_width is not None and drafter_width <= 0:
+        raise ValueError("drafter_width must be positive when provided")
     drafters: dict[str, list[ParsedExchange]] = defaultdict(list)
     for exchange in exchanges:
         if exchange.model == drafter_model:
             drafters[exchange.context_key].append(exchange)
     for values in drafters.values():
+        values.sort(key=lambda item: (item.sequence, item.duration_ms))
+        if drafter_width is not None:
+            del values[drafter_width:]
         values.sort(key=lambda item: (item.duration_ms, item.sequence))
 
     opportunities = []

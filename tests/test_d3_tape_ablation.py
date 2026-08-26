@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from examples.d3_tape_ablation import _order_candidates, _simulate
+from examples.d3_tape_ablation import (
+    ParsedExchange,
+    _order_candidates,
+    _simulate,
+    build_opportunities,
+)
+from self_speculation import ToolCall, format_tool_call_draft
 
 
 class D3TapeAblationTest(unittest.TestCase):
@@ -45,6 +51,63 @@ class D3TapeAblationTest(unittest.TestCase):
             ),
             (2, 2, 5, 3),
         )
+
+    def test_drafter_width_selects_dispatch_order_before_completion_order(self) -> None:
+        tokenizer = CharacterTokenizer()
+        actor_call = ToolCall(name="actual", arguments={}, format="tagged_json")
+        first = ToolCall(name="first", arguments={}, format="tagged_json")
+        second = ToolCall(name="second", arguments={}, format="tagged_json")
+        excluded_fastest = ToolCall(
+            name="excluded",
+            arguments={},
+            format="tagged_json",
+        )
+        opportunities = build_opportunities(
+            (
+                ParsedExchange(3, "draft", "same", 1.0, (excluded_fastest,)),
+                ParsedExchange(0, "actor", "same", 100.0, (actor_call,)),
+                ParsedExchange(2, "draft", "same", 20.0, (second,)),
+                ParsedExchange(1, "draft", "same", 50.0, (first,)),
+            ),
+            actor_model="actor",
+            drafter_model="draft",
+            tokenizer=tokenizer,
+            drafter_width=2,
+        )
+
+        self.assertEqual(len(opportunities), 1)
+        self.assertEqual(
+            opportunities[0].candidate_tokens,
+            (
+                tokenizer.tokens(second),
+                tokenizer.tokens(first),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "positive"):
+            build_opportunities(
+                (),
+                actor_model="actor",
+                drafter_model="draft",
+                tokenizer=tokenizer,
+                drafter_width=0,
+            )
+
+
+class CharacterTokenizer:
+    def encode(self, value: str, *, add_special_tokens: bool) -> tuple[int, ...]:
+        self.assert_no_special_tokens(add_special_tokens)
+        return tuple(ord(character) for character in value)
+
+    def tokens(self, call: ToolCall) -> tuple[int, ...]:
+        return self.encode(
+            format_tool_call_draft((call,)),
+            add_special_tokens=False,
+        )
+
+    @staticmethod
+    def assert_no_special_tokens(add_special_tokens: bool) -> None:
+        if add_special_tokens:
+            raise AssertionError("the tape analyzer must not add special tokens")
 
 
 if __name__ == "__main__":
