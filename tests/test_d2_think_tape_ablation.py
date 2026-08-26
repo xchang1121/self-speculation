@@ -4,6 +4,7 @@ import math
 import unittest
 
 from examples.d2_think_tape_ablation import (
+    analyze_d3_recording,
     analyze_recording,
     exact_call_match,
     next_probe_index,
@@ -141,6 +142,56 @@ class D2ThinkTapeAblationTest(unittest.TestCase):
         committed = analyze_recording(high_confidence_wrong)
         self.assertEqual(committed["d1_d2"]["exact_hits"], 0)
         self.assertEqual(committed["d2_oracle_exact_hits"], 1)
+
+    def test_d3_uses_only_parseable_drafts_available_before_the_boundary(self) -> None:
+        actual = _call("read", "right.py")
+        turn = _turn(
+            actual,
+            [
+                {
+                    **_probe(_call("read", "wrong.py"), 0.4, tokens=2),
+                    "token_ids": [1, 9],
+                    "snapshot_ms": 1.0,
+                    "wall_ms": 1.0,
+                },
+                {
+                    **_probe(actual, 0.95, tokens=3),
+                    "token_ids": [1, 2, 3],
+                    "snapshot_ms": 2.0,
+                    "wall_ms": 1.0,
+                },
+                {
+                    **_probe(actual, 0.99, tokens=3),
+                    "token_ids": [1, 2, 3],
+                    "snapshot_ms": 11.0,
+                    "wall_ms": 1.0,
+                },
+            ],
+        )
+        turn["main"].update(
+            {
+                "token_ids": [7, 8, 1, 2, 3],
+                "token_times_ms": [10.0] * 5,
+            }
+        )
+        result = analyze_d3_recording(
+            {"turns": [turn]},
+            MarkerTokenizer(),
+        )
+
+        self.assertEqual(result["d1"]["accepted_target_tokens"], 1)
+        self.assertEqual(result["d1_d2"]["accepted_target_tokens"], 3)
+        self.assertEqual(
+            result["available_parseable_oracle"]["accepted_target_tokens"],
+            3,
+        )
+
+
+class MarkerTokenizer:
+    def encode(self, value: str, *, add_special_tokens: bool) -> list[int]:
+        if add_special_tokens:
+            raise AssertionError("marker encoding must not add special tokens")
+        return [7, 8]
 
 
 if __name__ == "__main__":

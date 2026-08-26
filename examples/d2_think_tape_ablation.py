@@ -167,6 +167,24 @@ def exact_call_match(left: Any, right: Any) -> bool:
     )
 
 
+def _common_prefix_length(left: Sequence[int], right: Sequence[int]) -> int:
+    length = 0
+    for left_token, right_token in zip(left, right):
+        if left_token != right_token:
+            break
+        length += 1
+    return length
+
+
+def _find_subsequence(values: Sequence[int], needle: Sequence[int]) -> int | None:
+    if not needle:
+        return 0
+    for index in range(len(values) - len(needle) + 1):
+        if list(values[index : index + len(needle)]) == list(needle):
+            return index
+    return None
+
+
 def span_min_probability(
     selected_logprobs: Sequence[float | None],
     *,
@@ -583,6 +601,27 @@ def _select_d2(turn: Mapping[str, Any], threshold: float) -> dict[str, Any]:
     }
 
 
+def _phase1_early_abort_tokens(
+    turn: Mapping[str, Any],
+    *,
+    threshold: float,
+    span_tokens: int = 20,
+) -> int:
+    decision = _select_d2(turn, threshold)
+    probes = list(turn.get("probes") or [])[: int(decision["attempts"])]
+    total = 0
+    for probe in probes:
+        full_tokens = int(probe.get("token_count") or 0)
+        confidence = probe.get("confidence")
+        passes = (
+            isinstance(confidence, (int, float))
+            and math.isfinite(confidence)
+            and confidence >= threshold
+        )
+        total += full_tokens if passes else min(span_tokens, full_tokens)
+    return total
+
+
 def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) -> dict[str, Any]:
     turns = list(recording.get("turns") or [])
     eligible = [turn for turn in turns if _normalize_call((turn.get("main") or {}).get("call"))]
@@ -617,6 +656,9 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
     )
     d1_tokens = sum(int(decision["probe_tokens"]) for decision in d1_decisions)
     d2_tokens = sum(int(decision["probe_tokens"]) for decision in d2_decisions)
+    phase1_early_abort_tokens = sum(
+        _phase1_early_abort_tokens(turn, threshold=threshold) for turn in eligible
+    )
     mean_attempts = (
         sum(int(decision["attempts"]) for decision in d2_decisions) / len(eligible)
         if eligible
@@ -658,6 +700,12 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
             "mean_probe_attempts": mean_attempts,
             "probe_tokens": d2_tokens,
             "probe_token_ratio_vs_d1": token_ratio,
+            "phase1_20_token_early_abort": {
+                "probe_tokens": phase1_early_abort_tokens,
+                "probe_token_ratio_vs_d1": (
+                    phase1_early_abort_tokens / d1_tokens if d1_tokens else None
+                ),
+            },
             "recovered_hits": len(recovered),
             "lost_d1_hits": lost,
             "recovered_optimistic_runway_ms": recovered_runways,
@@ -665,6 +713,121 @@ def analyze_recording(recording: Mapping[str, Any], *, threshold: float = 0.90) 
         "d2_oracle_exact_hits": oracle_hits,
         "gates": gates,
         "product_gate_passed": all(gates.values()),
+    }
+
+
+def analyze_d3_recording(
+    recording: Mapping[str, Any],
+    tokenizer: Any,
+    *,
+    threshold: float = 0.90,
+) -> dict[str, Any]:
+    """Measure boundary-draft reuse from recorded D1/D2 probe continuations."""
+
+    marker = [
+        int(token)
+        for token in tokenizer.encode(
+            '<tool_call>\n{"name": "',
+            add_special_tokens=False,
+        )
+    ]
+    rows = []
+    for turn in recording.get("turns") or []:
+        main = turn.get("main") or {}
+        if _normalize_call(main.get("call")) is None:
+            continue
+        main_tokens = [int(token) for token in main.get("token_ids") or []]
+        token_times = [float(value) for value in main.get("token_times_ms") or []]
+        marker_index = _find_subsequence(main_tokens, marker)
+        if marker_index is None or marker_index >= len(token_times):
+            continue
+        continuation_start = marker_index + len(marker)
+        actual = main_tokens[continuation_start:]
+        boundary_ms = token_times[marker_index]
+        attempts = []
+        for probe in turn.get("probes") or []:
+            parseable = _normalize_call(probe.get("call")) is not None
+            end_ms = float(probe.get("snapshot_ms") or 0.0) + float(
+                probe.get("wall_ms") or 0.0
+            )
+            attempts.append(
+                {
+                    "probe": probe,
+                    "parseable": parseable,
+                    "available": parseable and end_ms <= boundary_ms,
+                    "accepted": _common_prefix_length(
+                        [int(token) for token in probe.get("token_ids") or []],
+                        actual,
+                    ),
+                }
+            )
+        d1 = attempts[0] if attempts and attempts[0]["available"] else None
+        d2_decision = _select_d2(turn, threshold)
+        considered = attempts[: int(d2_decision["attempts"])]
+        d2_available = [attempt for attempt in considered if attempt["available"]]
+        d2 = d2_available[-1] if d2_available else None
+        all_available = [attempt for attempt in attempts if attempt["available"]]
+        latest = all_available[-1] if all_available else None
+        rows.append(
+            {
+                "continuation_tokens": len(actual),
+                "d1_accepted": int(d1["accepted"]) if d1 else 0,
+                "d2_accepted": int(d2["accepted"]) if d2 else 0,
+                "latest_accepted": int(latest["accepted"]) if latest else 0,
+                "oracle_accepted": max(
+                    (int(attempt["accepted"]) for attempt in all_available),
+                    default=0,
+                ),
+                "all_probe_tokens": sum(
+                    int(attempt["probe"].get("token_count") or 0)
+                    for attempt in attempts
+                ),
+            }
+        )
+    d2_summary = analyze_recording(recording, threshold=threshold)
+    d1_probe_tokens = int(d2_summary["d1"]["probe_tokens"])
+    d2_probe_tokens = int(d2_summary["d1_d2"]["probe_tokens"])
+    d1_accepted = sum(row["d1_accepted"] for row in rows)
+    d2_accepted = sum(row["d2_accepted"] for row in rows)
+    marginal_accepted = d2_accepted - d1_accepted
+    marginal_probe_tokens = d2_probe_tokens - d1_probe_tokens
+    phase1_probe_tokens = int(
+        d2_summary["d1_d2"]["phase1_20_token_early_abort"]["probe_tokens"]
+    )
+    return {
+        "tool_turns_with_token_boundary": len(rows),
+        "tool_continuation_tokens": sum(row["continuation_tokens"] for row in rows),
+        "d1": {
+            "accepted_target_tokens": d1_accepted,
+            "probe_tokens": d1_probe_tokens,
+        },
+        "d1_d2": {
+            "accepted_target_tokens": d2_accepted,
+            "probe_tokens": d2_probe_tokens,
+            "marginal_accepted_target_tokens": marginal_accepted,
+            "marginal_probe_tokens": marginal_probe_tokens,
+            "marginal_probe_tokens_per_accepted_target_token": (
+                marginal_probe_tokens / marginal_accepted
+                if marginal_accepted > 0
+                else None
+            ),
+            "phase1_20_token_early_abort": {
+                "probe_tokens": phase1_probe_tokens,
+                "marginal_probe_tokens": phase1_probe_tokens - d1_probe_tokens,
+                "marginal_probe_tokens_per_accepted_target_token": (
+                    (phase1_probe_tokens - d1_probe_tokens) / marginal_accepted
+                    if marginal_accepted > 0
+                    else None
+                ),
+            },
+        },
+        "continue_all_reprobes_latest": {
+            "accepted_target_tokens": sum(row["latest_accepted"] for row in rows),
+            "probe_tokens": sum(row["all_probe_tokens"] for row in rows),
+        },
+        "available_parseable_oracle": {
+            "accepted_target_tokens": sum(row["oracle_accepted"] for row in rows),
+        },
     }
 
 
@@ -790,6 +953,9 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("--recording", type=Path, required=True)
     analyze.add_argument("--confidence-threshold", type=float, default=0.90)
+    analyze.add_argument("--d3", action="store_true")
+    analyze.add_argument("--tokenizer", default=DEFAULT_TOKENIZER)
+    analyze.add_argument("--revision", default=DEFAULT_TOKENIZER_REVISION)
     return parser
 
 
@@ -815,6 +981,18 @@ def main() -> None:
             recording,
             threshold=args.confidence_threshold,
         )
+        if args.d3:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.tokenizer,
+                revision=args.revision,
+            )
+            result["d3_boundary_reuse"] = analyze_d3_recording(
+                recording,
+                tokenizer,
+                threshold=args.confidence_threshold,
+            )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
