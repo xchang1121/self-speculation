@@ -132,7 +132,11 @@ class BoundaryDraftStoreTest(unittest.TestCase):
                 token_ids=(20, 21, 22),
                 boundary=DraftBoundary(token_ids=(10,)),
                 prompt_token_count=2,
-                metadata={"candidate_id": "drafter-a"},
+                metadata={
+                    "candidate_id": "drafter-a",
+                    "candidate_ids": ("drafter-a", "pattern-a"),
+                    "sources": ("drafter", "pattern-aware"),
+                },
             )
         )
         proposal = store.offer("observed", [90, 91, 10])
@@ -154,6 +158,8 @@ class BoundaryDraftStoreTest(unittest.TestCase):
             "steps": [{
                 "candidate_index": 0,
                 "candidate_id": "drafter-a",
+                "candidate_ids": ["drafter-a", "pattern-a"],
+                "sources": ["drafter", "pattern-aware"],
                 "drafted_tokens": 3,
                 "accepted_tokens": 2,
                 "rejected_tokens": 1,

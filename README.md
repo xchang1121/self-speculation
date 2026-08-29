@@ -238,6 +238,11 @@ The control plane validates this distinction and preserves all identities when
 equal token drafts merge, without using execution identity to collapse distinct
 Actor-visible predictions.
 
+Clear-time verification steps carry all merged `candidate_ids` and `sources`,
+not only the primary draft ID. Clients can therefore calibrate token acceptance
+for every contributing predictor without inferring attribution from bundle
+order or confusing registration with target acceptance.
+
 ### vLLM quick start
 
 Install the package in the vLLM frontend and worker environments, then opt in

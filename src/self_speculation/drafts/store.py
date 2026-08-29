@@ -36,6 +36,12 @@ def _common_prefix_length(left: Sequence[int], right: Sequence[int]) -> int:
     return length
 
 
+def _metadata_strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
 @dataclass(frozen=True, slots=True)
 class DraftProposal:
     request_id: str
@@ -73,6 +79,8 @@ class _CandidateDraft:
     prompt_token_count: int
     identity: tuple[object, ...]
     candidate_id: str | None = None
+    candidate_ids: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
     fired: bool = False
 
 
@@ -82,6 +90,8 @@ class _PendingProposal:
     sequence_length: int
     candidate_index: int
     candidate_id: str | None
+    candidate_ids: tuple[str, ...]
+    sources: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -185,6 +195,16 @@ class BoundaryDraftStore:
         )
         if candidate_id == "":
             candidate_id = None
+        candidate_ids = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    *((candidate_id,) if candidate_id is not None else ()),
+                    *_metadata_strings(draft.metadata.get("candidate_ids")),
+                )
+            )
+        )
+        sources = _metadata_strings(draft.metadata.get("sources"))
         identity: tuple[object, ...] = (
             ("id", candidate_id)
             if candidate_id is not None
@@ -196,6 +216,8 @@ class BoundaryDraftStore:
             prompt_token_count=draft.prompt_token_count,
             identity=identity,
             candidate_id=candidate_id,
+            candidate_ids=candidate_ids,
+            sources=sources,
         )
 
     def register(self, draft: DraftRequest) -> DraftReceipt:
@@ -329,6 +351,8 @@ class BoundaryDraftStore:
                     sequence_length=sequence_length,
                     candidate_index=candidate_index,
                     candidate_id=candidate.candidate_id,
+                    candidate_ids=candidate.candidate_ids,
+                    sources=candidate.sources,
                 )
                 self._injections += 1
                 self._proposed_tokens += len(proposed)
@@ -361,6 +385,8 @@ class BoundaryDraftStore:
             accepted_tokens=accepted_tokens,
             candidate_index=pending.candidate_index,
             candidate_id=pending.candidate_id,
+            candidate_ids=pending.candidate_ids,
+            sources=pending.sources,
         )
         state.verification_steps.append(step)
         state.pending = None

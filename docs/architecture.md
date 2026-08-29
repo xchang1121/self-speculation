@@ -155,6 +155,11 @@ Cleanup never invents feedback: a final pending offer is returned as
 `DraftReceipt.accepted_token_count` from registration must not be used as an
 online acceptance signal.
 
+When equal complete drafts merge, each verification step also returns the full
+`candidate_ids` and `sources` sets captured at registration. This lets an agent
+update source-aware decoder calibration while keeping action adoption and
+execution-latency evidence in the action Runtime.
+
 `DraftFeedback.clear()` returns the optional `DraftVerificationOutcome` after
 atomically removing request state. HTTP and vLLM RPC bridges preserve the same
 shape under `verification`; aggregate field names intentionally match vLLM's

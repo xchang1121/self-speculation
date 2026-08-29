@@ -485,6 +485,8 @@ def expect_verification(
         "steps": [{
             "candidate_index": 0,
             "candidate_id": candidate_id,
+            "candidate_ids": [candidate_id],
+            "sources": ["drafter", "pattern-aware"],
             "drafted_tokens": drafted,
             "accepted_tokens": accepted,
             "rejected_tokens": drafted - accepted,

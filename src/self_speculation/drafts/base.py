@@ -92,8 +92,23 @@ class DraftVerificationStep:
     accepted_tokens: int
     candidate_index: int = 0
     candidate_id: str | None = None
+    candidate_ids: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        candidate_ids = tuple(
+            dict.fromkeys(
+                value.strip()
+                for value in (
+                    *((self.candidate_id,) if self.candidate_id is not None else ()),
+                    *self.candidate_ids,
+                )
+                if value.strip()
+            )
+        )
+        sources = tuple(dict.fromkeys(value.strip() for value in self.sources if value.strip()))
+        object.__setattr__(self, "candidate_ids", candidate_ids)
+        object.__setattr__(self, "sources", sources)
         if self.drafted_tokens <= 0:
             raise ValueError("drafted_tokens must be positive")
         if self.accepted_tokens < 0:
@@ -108,13 +123,18 @@ class DraftVerificationStep:
         return self.drafted_tokens - self.accepted_tokens
 
     def to_mapping(self) -> dict[str, Any]:
-        return {
+        result = {
             "candidate_index": self.candidate_index,
             "candidate_id": self.candidate_id,
             "drafted_tokens": self.drafted_tokens,
             "accepted_tokens": self.accepted_tokens,
             "rejected_tokens": self.rejected_tokens,
         }
+        if self.candidate_ids:
+            result["candidate_ids"] = list(self.candidate_ids)
+        if self.sources:
+            result["sources"] = list(self.sources)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +225,12 @@ class DraftVerificationOutcome:
             if not isinstance(raw_step, Mapping):
                 raise ValueError("every verification step must be an object")
             candidate_id_value = raw_step.get("candidate_id")
+            candidate_ids_value = raw_step.get("candidate_ids") or ()
+            sources_value = raw_step.get("sources") or ()
+            if not isinstance(candidate_ids_value, (list, tuple)):
+                raise ValueError("verification candidate_ids must be an array")
+            if not isinstance(sources_value, (list, tuple)):
+                raise ValueError("verification sources must be an array")
             steps.append(
                 DraftVerificationStep(
                     drafted_tokens=int(raw_step.get("drafted_tokens") or 0),
@@ -215,6 +241,8 @@ class DraftVerificationOutcome:
                         if candidate_id_value is not None
                         else None
                     ),
+                    candidate_ids=tuple(str(value) for value in candidate_ids_value),
+                    sources=tuple(str(value) for value in sources_value),
                 )
             )
         outcome = cls(
