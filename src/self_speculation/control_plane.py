@@ -53,6 +53,38 @@ def _array(value: Any, *, field: str) -> tuple[Any, ...]:
     return tuple(value)
 
 
+def _action_identity(
+    value: Any, *, candidate_id: str
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("candidate.action_identity must be an object")
+    try:
+        version = int(value.get("version", 1))
+    except (TypeError, ValueError) as error:
+        raise ValueError("candidate.action_identity.version must be an integer") from error
+    if version != 1:
+        raise ValueError("candidate.action_identity.version must be 1")
+    predicted = str(value.get("predicted_action_id") or "").strip()
+    execution = str(value.get("execution_action_id") or "").strip()
+    projected = value.get("projected")
+    if not predicted or not execution:
+        raise ValueError("candidate.action_identity action IDs must not be empty")
+    if predicted != candidate_id:
+        raise ValueError("candidate.id must equal its predicted_action_id")
+    if not isinstance(projected, bool):
+        raise ValueError("candidate.action_identity.projected must be a boolean")
+    if projected != (predicted != execution):
+        raise ValueError("candidate.action_identity projection flag is inconsistent")
+    return {
+        "version": version,
+        "predicted_action_id": predicted,
+        "execution_action_id": execution,
+        "projected": projected,
+    }
+
+
 @dataclass(slots=True)
 class CandidateBundleBuilder:
     """Turn ranked concrete tool calls into target-tokenizer draft choices."""
@@ -131,6 +163,9 @@ class CandidateBundleBuilder:
             if not name:
                 raise ValueError("candidate.tool_call.name must not be empty")
             candidate_id = str(raw_candidate.get("id") or index)
+            action_identity = _action_identity(
+                raw_candidate.get("action_identity"), candidate_id=candidate_id
+            )
             score = raw_candidate.get("score") or {}
             if not isinstance(score, Mapping):
                 raise ValueError("candidate.score must be an object")
@@ -140,22 +175,25 @@ class CandidateBundleBuilder:
                 index=0,
                 format=format_name,
             )
+            metadata = {
+                "candidate_id": candidate_id,
+                "candidate_index": index,
+                "sources": _array(
+                    raw_candidate.get("sources"), field="candidate.sources"
+                ),
+                "provenance": _array(
+                    raw_candidate.get("provenance"),
+                    field="candidate.provenance",
+                ),
+                "score": dict(score),
+            }
+            if action_identity is not None:
+                metadata["action_identity"] = action_identity
             draft = await builder.build_for_request(
                 (call,),
                 request_id=request_id,
                 prompt_token_count=prompt_token_count,
-                metadata={
-                    "candidate_id": candidate_id,
-                    "candidate_index": index,
-                    "sources": _array(
-                        raw_candidate.get("sources"), field="candidate.sources"
-                    ),
-                    "provenance": _array(
-                        raw_candidate.get("provenance"),
-                        field="candidate.provenance",
-                    ),
-                    "score": dict(score),
-                },
+                metadata=metadata,
             )
             drafts.append(draft)
         return DraftBundle(
@@ -656,6 +694,20 @@ def _merge_draft_metadata(
     }
     if provenance:
         metadata["provenance"] = provenance
+    action_identities = _unique_metadata(
+        tuple(
+            identity
+            for identity in (
+                primary.metadata.get("action_identity"),
+                duplicate.metadata.get("action_identity"),
+            )
+            if identity is not None
+        )
+        + _metadata_array(primary.metadata.get("action_identities"))
+        + _metadata_array(duplicate.metadata.get("action_identities"))
+    )
+    if action_identities:
+        metadata["action_identities"] = action_identities
     fork = duplicate.metadata.get("fork") or primary.metadata.get("fork")
     if isinstance(fork, Mapping):
         metadata["fork"] = dict(fork)
@@ -704,6 +756,16 @@ def _draft_observation(draft: DraftRequest) -> dict[str, Any]:
     score = metadata.get("score")
     if isinstance(score, Mapping):
         observation["score"] = dict(score)
+    action_identities = _unique_metadata(
+        tuple(
+            identity
+            for identity in (metadata.get("action_identity"),)
+            if identity is not None
+        )
+        + _metadata_array(metadata.get("action_identities"))
+    )
+    if action_identities:
+        observation["action_identities"] = action_identities
     fork = metadata.get("fork")
     if isinstance(fork, Mapping):
         observation["fork"] = dict(fork)

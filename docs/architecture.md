@@ -123,6 +123,13 @@ same bundle. Equality is based on complete draft content and boundary, not a
 truncated prefix; duplicate content keeps merged source, candidate-ID, and
 proposal provenance.
 
+The agent protocol keeps two action identities. `predicted_action_id` names the
+exact Actor-visible call represented by the draft and owns verification;
+`execution_action_id` may name a wider operation that can reconstruct that
+call through a lossless projection. Draft-content deduplication may combine
+their metadata, but it never rewrites one predicted identity into the covering
+execution identity.
+
 ### Engine-side boundary proposer
 
 `BoundaryDraftStore` is independent of vLLM and uses stable request IDs. For

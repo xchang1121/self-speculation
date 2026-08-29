@@ -37,7 +37,7 @@ class CandidateBundleBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         bundle = await builder.build(
             {
-                "version": 1,
+                "version": 2,
                 "request_id": "actor-request",
                 "format": "tagged_json",
                 "boundary": "<tool_call>",
@@ -46,6 +46,12 @@ class CandidateBundleBuilderTest(unittest.IsolatedAsyncioTestCase):
                 "candidates": [
                     {
                         "id": "read-a",
+                        "action_identity": {
+                            "version": 1,
+                            "predicted_action_id": "read-a",
+                            "execution_action_id": "covering-read",
+                            "projected": True,
+                        },
                         "sources": ["drafter", "pattern-aware"],
                         "provenance": [{"proposalID": "p", "actionID": "a"}],
                         "tool_call": {
@@ -76,6 +82,15 @@ class CandidateBundleBuilderTest(unittest.IsolatedAsyncioTestCase):
             bundle.drafts[0].metadata["sources"],
             ("drafter", "pattern-aware"),
         )
+        self.assertEqual(
+            bundle.drafts[0].metadata["action_identity"],
+            {
+                "version": 1,
+                "predicted_action_id": "read-a",
+                "execution_action_id": "covering-read",
+                "projected": True,
+            },
+        )
         self.assertEqual(bundle.drafts[0].tool_calls[0].name, "read")
         self.assertLessEqual(len(bundle.drafts[0].token_ids), 8)
         self.assertEqual(
@@ -98,6 +113,23 @@ class CandidateBundleBuilderTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "tool_call"):
             await builder.build(
                 {"request_id": "x", "candidates": [{"id": "bad"}]}
+            )
+        with self.assertRaisesRegex(ValueError, "predicted_action_id"):
+            await builder.build(
+                {
+                    "request_id": "x",
+                    "candidates": [
+                        {
+                            "id": "predicted",
+                            "action_identity": {
+                                "predicted_action_id": "different",
+                                "execution_action_id": "different",
+                                "projected": False,
+                            },
+                            "tool_call": {"name": "read"},
+                        }
+                    ],
+                }
             )
 
 
@@ -212,6 +244,17 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             str(merged.drafts[-1].metadata["candidate_id"]).startswith("self:")
+        )
+        self.assertEqual(
+            receipt.details["bundle"]["candidates"][0]["action_identities"],
+            (
+                {
+                    "version": 1,
+                    "predicted_action_id": "external",
+                    "execution_action_id": "external",
+                    "projected": False,
+                },
+            ),
         )
         observed = receipt.details["bundle"]["candidates"][-1]
         self.assertEqual(
@@ -376,12 +419,19 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
 
 def candidate_payload():
     return {
+        "version": 2,
         "request_id": "actor-request",
         "format": "tagged_json",
         "boundary": "<tool_call>",
         "candidates": [
             {
                 "id": "external",
+                "action_identity": {
+                    "version": 1,
+                    "predicted_action_id": "external",
+                    "execution_action_id": "external",
+                    "projected": False,
+                },
                 "sources": ["drafter", "pattern-aware"],
                 "tool_call": {
                     "name": "read",

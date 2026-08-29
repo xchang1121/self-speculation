@@ -231,6 +231,13 @@ work, so a late fork cannot recreate a closed request. See the
 [vLLM guide](docs/vllm.md#agent-sidecar-for-unified-candidates-and-self-fork)
 for complete wiring.
 
+Candidate-control version 2 may include `action_identity`. Its
+`predicted_action_id` is also the candidate ID used by target verification;
+`execution_action_id` separately identifies a lossless covering execution.
+The control plane validates this distinction and preserves all identities when
+equal token drafts merge, without using execution identity to collapse distinct
+Actor-visible predictions.
+
 ### vLLM quick start
 
 Install the package in the vLLM frontend and worker environments, then opt in
