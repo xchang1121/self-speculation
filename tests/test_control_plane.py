@@ -197,6 +197,23 @@ class AgreeingForkEngine(ForkEngine):
         )
 
 
+class ParallelForkEngine(ForkEngine):
+    async def stream(
+        self, request: InferenceRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
+        yield StreamChunk(
+            text='{"name":"read","arguments":{"path":"a.txt"}}</tool_call>'
+        )
+        yield StreamChunk(
+            text=(
+                '<tool_call>{"id":"call-b","name":"read",'
+                '"arguments":{"path":"b.txt"}}</tool_call>'
+            ),
+            finish_reason="tool_calls",
+        )
+
+
 class GatedForkEngine(ForkEngine):
     def __init__(self) -> None:
         super().__init__()
@@ -256,6 +273,10 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
+        self.assertEqual(
+            receipt.details["bundle"]["candidates"][0]["provenance"],
+            ({"proposalID": "p", "actionID": "a"},),
+        )
         observed = receipt.details["bundle"]["candidates"][-1]
         self.assertEqual(
             observed["tool_calls"],
@@ -285,6 +306,45 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
 
         await plane.clear("actor-request")
         self.assertEqual(feedback.cleared, ["actor-request"])
+
+    async def test_preserves_a_parallel_fork_as_one_complete_candidate(self) -> None:
+        feedback = RecordingBundleFeedback()
+        plane = SelfSpeculationControlPlane(
+            feedback,
+            CandidateBundleBuilder(tokenizer=encode, max_draft_tokens=64),
+            fork_runner=SnapshotForkRunner(
+                ParallelForkEngine(),
+                encode,
+                max_draft_tokens=64,
+            ),
+        )
+
+        receipt = await plane.fork(fork_payload())
+
+        self.assertEqual(receipt.details["candidate_count"], 1)
+        observed = receipt.details["bundle"]["candidates"][0]
+        self.assertEqual(
+            observed["tool_calls"],
+            (
+                {
+                    "name": "read",
+                    "arguments": {"path": "a.txt"},
+                    "index": 0,
+                    "format": "tagged_json",
+                },
+                {
+                    "name": "read",
+                    "arguments": {"path": "b.txt"},
+                    "index": 1,
+                    "format": "tagged_json",
+                    "call_id": "call-b",
+                },
+            ),
+        )
+        self.assertEqual(
+            [(call.name, call.arguments) for call in feedback.bundles[-1].drafts[0].tool_calls],
+            [("read", {"path": "a.txt"}), ("read", {"path": "b.txt"})],
+        )
 
     async def test_deduplicates_self_agreement_by_complete_draft_content(self) -> None:
         feedback = RecordingBundleFeedback()
@@ -433,6 +493,7 @@ def candidate_payload():
                     "projected": False,
                 },
                 "sources": ["drafter", "pattern-aware"],
+                "provenance": [{"proposalID": "p", "actionID": "a"}],
                 "tool_call": {
                     "name": "read",
                     "arguments": {"path": "in.txt"},

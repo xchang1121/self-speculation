@@ -217,10 +217,10 @@ class ForkController:
                             if self.strict_fork_errors:
                                 raise
                         else:
-                            start_draft(final_calls)
                             for tool_call in final_calls:
                                 decoded.append(tool_call)
                                 yield ToolCallEvent(tool_call)
+                            start_draft(tuple(decoded))
                             fork_terminal = True
                             yield ForkCompletedEvent(tuple(decoded))
                     except Exception as error:
@@ -245,7 +245,6 @@ class ForkController:
                             if fork_iterator is not None:
                                 await _close(fork_iterator)
                         else:
-                            start_draft(calls)
                             for tool_call in calls:
                                 decoded.append(tool_call)
                                 yield ToolCallEvent(tool_call)

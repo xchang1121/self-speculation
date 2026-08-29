@@ -168,9 +168,9 @@ controller = ForkController(
 
 ## D3 draft feedback
 
-Decoding a fork predicts an action, but it only accelerates main-model token
+Decoding a fork predicts an action batch, but it only accelerates main-model token
 generation when the engine can verify that prediction through its speculative
-decoding path. `ToolCallDraftBuilder` formats and tokenizes the action after its
+decoding path. `ToolCallDraftBuilder` formats and tokenizes all calls after their
 model-specific boundary; a `DraftFeedback` adapter then registers it under the
 main request ID.
 
@@ -216,7 +216,16 @@ output preservation through the target verifier.
 predictor with the target tokenizer. `SelfSpeculationControlPlane` combines
 that external bundle with an optional D1 `SnapshotForkRunner`, deduplicates
 identical complete drafts while merging provenance, and submits one ordered
-`DraftBundle` to the target verifier. Its portable FastAPI routes are:
+`DraftBundle` to the target verifier.
+
+The snapshot runner consumes the fork through its terminal stream boundary
+before constructing a draft, so structured or textual parallel calls arriving
+across multiple chunks remain one candidate rather than silently truncating to
+the first call. Bundle observations preserve every call index/ID/format plus
+candidate IDs, sources, proposal provenance, scores, timing, and logprobs for
+the action runtime that consumes the receipt.
+
+Its portable FastAPI routes are:
 
 | Route | Purpose |
 | --- | --- |

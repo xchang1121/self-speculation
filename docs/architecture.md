@@ -78,7 +78,10 @@ engines that need a different continuation or session API.
 
 The fork is opened at most once. Main and fork iterators then advance as
 independent asyncio tasks; a slow fork does not stop consumption of the main
-stream.
+stream. Completed calls are emitted as they become parseable, but D3 submission
+waits for the fork's terminal boundary and atomically uses the complete decoded
+batch. This prevents the first parallel call from prematurely closing the
+candidate while preserving concurrent main-stream progress.
 
 ### Streaming tool-call decoding
 
@@ -121,7 +124,10 @@ from Drafter, PatternAware, or another predictor and builds their drafts with
 the target tokenizer. A D1 snapshot fork can contribute another draft to the
 same bundle. Equality is based on complete draft content and boundary, not a
 truncated prefix; duplicate content keeps merged source, candidate-ID, and
-proposal provenance.
+proposal provenance. The snapshot runner likewise consumes its complete fork
+stream before building that draft. Its bounded receipt projection retains all
+tool-call indexes, provider call IDs, formats, source/candidate attribution,
+scores, fork timing, logprobs, and proposal provenance for downstream policy.
 
 The agent protocol keeps two action identities. `predicted_action_id` names the
 exact Actor-visible call represented by the draft and owns verification;

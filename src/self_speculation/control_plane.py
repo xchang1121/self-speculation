@@ -295,10 +295,7 @@ class SnapshotForkRunner:
                     if value.logprob is not None and math.isfinite(value.logprob)
                 )
                 decoded.extend(decoder.feed(chunk))
-                if decoded:
-                    break
-            if not decoded:
-                decoded.extend(decoder.finish())
+            decoded.extend(decoder.finish())
         finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:
@@ -749,10 +746,14 @@ def _draft_observation(draft: DraftRequest) -> dict[str, Any]:
                 "arguments": call.arguments,
                 "index": call.index,
                 "format": call.format,
+                **({"call_id": call.call_id} if call.call_id is not None else {}),
             }
             for call in draft.tool_calls
         ),
     }
+    provenance = _metadata_array(metadata.get("provenance"))
+    if provenance:
+        observation["provenance"] = provenance
     score = metadata.get("score")
     if isinstance(score, Mapping):
         observation["score"] = dict(score)

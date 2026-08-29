@@ -65,6 +65,13 @@ class DraftAwareEngine:
                     '"arguments":{"q":"spork"}}</tool_call>'
                 )
             )
+            yield StreamChunk(
+                text=(
+                    '<tool_call>{"name":"write",'
+                    '"arguments":{"path":"result.txt"}}</tool_call>'
+                ),
+                finish_reason="tool_calls",
+            )
             return
 
         yield StreamChunk(text="first", token_ids=(1,))
@@ -93,7 +100,7 @@ def controller(
 
 
 class ControllerDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
-    async def test_submits_decoded_action_before_main_finishes_then_clears(self) -> None:
+    async def test_submits_complete_decoded_action_batch_before_main_finishes_then_clears(self) -> None:
         feedback = RecordingFeedback()
 
         result = await controller(feedback).run(
@@ -105,6 +112,10 @@ class ControllerDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         draft = feedback.drafts[0]
         self.assertEqual(draft.request_id, "turn")
         self.assertIn('"name":"search"', draft.text)
+        self.assertEqual(
+            [(call.name, call.index) for call in draft.tool_calls],
+            [("search", 0), ("write", 1)],
+        )
         self.assertTrue(draft.token_ids)
         self.assertEqual(draft.boundary.text, "<tool_call>")
         self.assertIsNotNone(result.draft_receipt)
