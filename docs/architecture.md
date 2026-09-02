@@ -113,9 +113,9 @@ stream seen by the parser.
 
 One `DraftRequest` represents one boundary-relative continuation. A
 `DraftBundle` preserves the ranking of several alternative continuations for
-the same active target request; `DraftBundleFeedback` submits or replaces the
-complete set atomically. The requests travel through one of several feedback
-implementations:
+the same active target request. `DraftFeedback` always replaces that complete
+set atomically; one candidate is simply a bundle of size one. There is no
+separate single-draft mutation path. Implementations include:
 
 - `CallableDraftFeedback` for local engines or application callbacks;
 - `HTTPDraftFeedback` for a portable request-scoped sidecar;

@@ -62,7 +62,6 @@ class DraftStoreSnapshot:
     proposed_tokens: int
     divergent_drafts: int
     stale_drafts: int
-    bundle_registrations: int = 0
     registered_candidates: int = 0
     fallback_injections: int = 0
     resolved_proposals: int = 0
@@ -97,7 +96,6 @@ class _PendingProposal:
 @dataclass(slots=True)
 class _RequestDraft:
     candidates: tuple[_CandidateDraft, ...]
-    bundled: bool
     last_offer_sequence_length: int | None = None
     pending: _PendingProposal | None = None
     verification_steps: list[DraftVerificationStep] = field(default_factory=list)
@@ -133,7 +131,6 @@ class BoundaryDraftStore:
         self._proposed_tokens = 0
         self._divergent_drafts = 0
         self._stale_drafts = 0
-        self._bundle_registrations = 0
         self._registered_candidates = 0
         self._fallback_injections = 0
         self._resolved_proposals = 0
@@ -146,12 +143,10 @@ class BoundaryDraftStore:
     def _request(
         candidates: tuple[_CandidateDraft, ...],
         *,
-        bundled: bool,
         previous: _RequestDraft | None = None,
     ) -> _RequestDraft:
         return _RequestDraft(
             candidates=candidates,
-            bundled=bundled,
             last_offer_sequence_length=(
                 previous.last_offer_sequence_length
                 if previous is not None
@@ -220,28 +215,6 @@ class BoundaryDraftStore:
             sources=sources,
         )
 
-    def register(self, draft: DraftRequest) -> DraftReceipt:
-        candidate = self._candidate(draft)
-        with self._lock:
-            previous = self._requests.get(draft.request_id)
-            replaced = previous is not None
-            self._requests[draft.request_id] = self._request(
-                (candidate,),
-                bundled=False,
-                previous=previous,
-            )
-            self._registrations += 1
-            self._registered_candidates += 1
-        return DraftReceipt(
-            request_id=draft.request_id,
-            registered=True,
-            draft_token_count=len(candidate.token_ids),
-            details={
-                "boundary_token_count": len(candidate.boundary_token_ids),
-                "replaced": replaced,
-            },
-        )
-
     def register_bundle(self, bundle: DraftBundle) -> DraftReceipt:
         candidates: list[_CandidateDraft] = []
         seen: set[tuple[object, ...]] = set()
@@ -256,7 +229,7 @@ class BoundaryDraftStore:
 
         with self._lock:
             previous = self._requests.get(bundle.request_id)
-            if previous is not None and previous.bundled:
+            if previous is not None:
                 previous_candidates = {
                     candidate.identity: candidate
                     for candidate in previous.candidates
@@ -267,11 +240,9 @@ class BoundaryDraftStore:
                         candidate.fired = old.fired
             self._requests[bundle.request_id] = self._request(
                 tuple(candidates),
-                bundled=True,
                 previous=previous,
             )
             self._registrations += 1
-            self._bundle_registrations += 1
             self._registered_candidates += len(candidates)
         return DraftReceipt(
             request_id=bundle.request_id,
@@ -490,7 +461,6 @@ class BoundaryDraftStore:
                 proposed_tokens=self._proposed_tokens,
                 divergent_drafts=self._divergent_drafts,
                 stale_drafts=self._stale_drafts,
-                bundle_registrations=self._bundle_registrations,
                 registered_candidates=self._registered_candidates,
                 fallback_injections=self._fallback_injections,
                 resolved_proposals=self._resolved_proposals,
@@ -508,10 +478,7 @@ class BoundaryDraftFeedback:
     store: BoundaryDraftStore
     name: str = "boundary-draft-store"
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
-        return self.store.register(draft)
-
-    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         return self.store.register_bundle(bundle)
 
     async def clear(

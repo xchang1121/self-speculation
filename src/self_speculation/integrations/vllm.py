@@ -24,13 +24,11 @@ from ..drafts import (
     DraftRequest,
     DraftVerificationOutcome,
     HTTPDraftFeedback,
-    normalize_draft_receipt,
 )
 
 
 _HOOK_MARKER = "_self_speculation_request_id_hook"
 _RPC_MARKER = "_self_speculation_worker_rpc"
-REGISTER_DRAFT_RPC = "self_speculation_register_draft"
 REGISTER_DRAFT_BUNDLE_RPC = "self_speculation_register_draft_bundle"
 CLEAR_DRAFT_RPC = "self_speculation_clear_draft"
 DRAFT_STATUS_RPC = "self_speculation_draft_status"
@@ -49,7 +47,7 @@ class VLLMRequestNotActiveError(VLLMIntegrationError):
 def _worker_proposer(worker: Any) -> Any | None:
     runner = getattr(worker, "model_runner", None)
     proposer = getattr(runner, "drafter", None)
-    if proposer is None or not hasattr(proposer, "register_draft"):
+    if proposer is None or not hasattr(proposer, "register_draft_bundle"):
         return None
     return proposer
 
@@ -121,7 +119,6 @@ def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
     if getattr(worker_class, _RPC_MARKER, False):
         return False
     method_names = (
-        REGISTER_DRAFT_RPC,
         REGISTER_DRAFT_BUNDLE_RPC,
         CLEAR_DRAFT_RPC,
         DRAFT_STATUS_RPC,
@@ -133,43 +130,13 @@ def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
             + ", ".join(collisions)
         )
 
-    def register(
-        worker: Any,
-        request_id: str,
-        draft_token_ids: list[int],
-        boundary_token_ids: list[int],
-        prompt_token_count: int | None = None,
-    ) -> dict[str, Any]:
-        proposer = _worker_proposer(worker)
-        if proposer is None:
-            return {"status": "skipped", "reason": "no_boundary_proposer"}
-        try:
-            internal_request_id = _worker_request_id(
-                worker.model_runner, request_id
-            )
-            if prompt_token_count is None:
-                prompt_token_count = _worker_prompt_token_count(
-                    worker.model_runner, internal_request_id
-                )
-            return proposer.register_draft(
-                internal_request_id,
-                draft_token_ids,
-                boundary_token_ids,
-                prompt_token_count,
-                external_request_id=request_id,
-            )
-        except VLLMRequestNotActiveError:
-            return {"status": "pending", "reason": "request_not_active"}
-        except (TypeError, ValueError, VLLMIntegrationError) as error:
-            return {"status": "error", "error": str(error)}
-
     def register_bundle(
         worker: Any,
         request_id: str,
         draft_token_ids: list[list[int]],
         boundary_token_ids: list[list[int]],
         prompt_token_count: int | None = None,
-        candidate_ids: list[str | None] | None = None,
+        candidate_metadata: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         proposer = _worker_proposer(worker)
         if proposer is None or not hasattr(proposer, "register_draft_bundle"):
@@ -187,7 +154,7 @@ def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
                 draft_token_ids,
                 boundary_token_ids,
                 prompt_token_count,
-                candidate_ids=candidate_ids,
+                candidate_metadata=candidate_metadata,
                 external_request_id=request_id,
             )
         except VLLMRequestNotActiveError:
@@ -207,7 +174,6 @@ def install_vllm_worker_rpc(worker_class: type[Any] | None = None) -> bool:
             return {"status": "skipped", "reason": "no_boundary_proposer"}
         return {"status": "ok", **proposer.status()}
 
-    setattr(worker_class, REGISTER_DRAFT_RPC, register)
     setattr(worker_class, REGISTER_DRAFT_BUNDLE_RPC, register_bundle)
     setattr(worker_class, CLEAR_DRAFT_RPC, clear)
     setattr(worker_class, DRAFT_STATUS_RPC, status)
@@ -310,34 +276,7 @@ class VLLMCollectiveRPCDraftFeedback:
         )
         return _rpc_results(value)
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
-        if not draft.token_ids:
-            raise ValueError("vLLM draft feedback requires token_ids")
-        if draft.boundary is None or not draft.boundary.token_ids:
-            raise ValueError("vLLM draft feedback requires boundary token_ids")
-        results = await self._rpc(
-            REGISTER_DRAFT_RPC,
-            (
-                draft.request_id,
-                list(draft.token_ids),
-                list(draft.boundary.token_ids),
-                draft.prompt_token_count,
-            ),
-        )
-        registered = _registered_results(results)
-        counts = [
-            int(result["draft_token_count"])
-            for result in registered
-            if result.get("draft_token_count") is not None
-        ]
-        return DraftReceipt(
-            request_id=draft.request_id,
-            registered=True,
-            draft_token_count=min(counts) if counts else len(draft.token_ids),
-            details={"worker_results": results},
-        )
-
-    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         for draft in bundle.drafts:
             if not draft.token_ids:
                 raise ValueError("vLLM draft feedback requires token_ids")
@@ -350,12 +289,6 @@ class VLLMCollectiveRPCDraftFeedback:
         }
         if len(prompt_counts) > 1:
             raise ValueError("bundled drafts must use one prompt_token_count")
-        candidate_ids = [
-            str(draft.metadata["candidate_id"])
-            if draft.metadata.get("candidate_id") is not None
-            else None
-            for draft in bundle.drafts
-        ]
         results = await self._rpc(
             REGISTER_DRAFT_BUNDLE_RPC,
             (
@@ -363,7 +296,7 @@ class VLLMCollectiveRPCDraftFeedback:
                 [list(draft.token_ids) for draft in bundle.drafts],
                 [list(draft.boundary.token_ids) for draft in bundle.drafts],
                 next(iter(prompt_counts), None),
-                candidate_ids,
+                [dict(draft.metadata) for draft in bundle.drafts],
             ),
         )
         registered = _registered_results(results)
@@ -422,41 +355,12 @@ class VLLMHTTPDraftFeedback(HTTPDraftFeedback):
     ) -> None:
         if not prefix.startswith("/") or prefix.endswith("/"):
             raise ValueError("route prefix must start with '/' and not end with '/'")
-        kwargs.setdefault("submit_path", prefix + "/drafts")
+        kwargs.setdefault("submit_path", prefix + "/draft-bundles")
         kwargs.setdefault("clear_path", prefix + "/clear")
         kwargs.setdefault("clear_method", "POST")
         kwargs.setdefault("name", "vllm-http-draft-feedback")
         super().__init__(base_url, **kwargs)
         self.status_path = prefix + "/status"
-        self.bundle_submit_path = prefix + "/draft-bundles"
-
-    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
-        response = await self._client.post(
-            self._url(self.bundle_submit_path),
-            json={
-                "request_id": bundle.request_id,
-                "drafts": [
-                    dict(self.submit_payload(draft))
-                    for draft in bundle.drafts
-                ],
-                "metadata": dict(bundle.metadata),
-            },
-            headers=self._headers(),
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload = self._response_payload(response)
-        receipt = normalize_draft_receipt(payload, bundle.drafts[0])
-        return DraftReceipt(
-            request_id=receipt.request_id,
-            registered=receipt.registered,
-            draft_token_count=receipt.draft_token_count,
-            accepted_token_count=receipt.accepted_token_count,
-            details={
-                **dict(receipt.details),
-                "candidate_count": len(bundle.drafts),
-            },
-        )
 
     def clear_payload(self, request_id: str) -> Mapping[str, Any]:
         return {"request_id": request_id}
@@ -561,21 +465,6 @@ def install_vllm_http_routes(
             metadata=dict(payload.get("metadata") or {}),
         )
 
-    async def submit(payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            draft = request_from_payload(payload)
-            current_feedback = await feedback()
-            receipt = await when_request_active(
-                lambda: current_feedback.submit(draft)
-            )
-        except (TypeError, ValueError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        except VLLMRequestNotActiveError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        except VLLMIntegrationError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
-        return receipt_payload(receipt)
-
     def receipt_payload(receipt: DraftReceipt) -> dict[str, Any]:
         return {
             "request_id": receipt.request_id,
@@ -585,7 +474,7 @@ def install_vllm_http_routes(
             "details": dict(receipt.details),
         }
 
-    async def submit_bundle(payload: dict[str, Any]) -> dict[str, Any]:
+    async def submit(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             request_id = str(payload.get("request_id") or "")
             raw_drafts = payload.get("drafts")
@@ -607,7 +496,7 @@ def install_vllm_http_routes(
             )
             current_feedback = await feedback()
             receipt = await when_request_active(
-                lambda: current_feedback.submit_bundle(bundle)
+                lambda: current_feedback.submit(bundle)
             )
         except (TypeError, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -630,7 +519,7 @@ def install_vllm_http_routes(
                 engine_client, timeout=timeout
             )
             receipt = await when_request_active(
-                lambda: current_feedback.submit_bundle(bundle)
+                lambda: current_feedback.submit(bundle)
             )
         except (TypeError, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -665,8 +554,7 @@ def install_vllm_http_routes(
             raise HTTPException(status_code=503, detail=str(error)) from error
         return {"status": "ok", "worker_results": results}
 
-    add_api_route(prefix + "/drafts", submit, methods=["POST"])
-    add_api_route(prefix + "/draft-bundles", submit_bundle, methods=["POST"])
+    add_api_route(prefix + "/draft-bundles", submit, methods=["POST"])
     add_api_route(prefix + "/candidates", submit_candidates, methods=["POST"])
     add_api_route(prefix + "/clear", clear, methods=["POST"])
     add_api_route(prefix + "/status", status, methods=["GET"])
@@ -777,38 +665,6 @@ class VLLMBoundaryProposer:
     def set_request_ids(self, request_ids: tuple[str, ...]) -> None:
         self._request_ids = tuple(str(request_id) for request_id in request_ids)
 
-    def register_draft(
-        self,
-        request_id: str,
-        draft_token_ids: list[int],
-        boundary_token_ids: list[int],
-        prompt_token_count: int = 0,
-        *,
-        external_request_id: str | None = None,
-    ) -> dict[str, Any]:
-        external_id = external_request_id or request_id
-        with self._alias_lock:
-            receipt = self.store.register(
-                DraftRequest(
-                    request_id=request_id,
-                    token_ids=tuple(draft_token_ids),
-                    boundary=DraftBoundary(token_ids=tuple(boundary_token_ids)),
-                    prompt_token_count=prompt_token_count,
-                )
-            )
-            previous = self._request_aliases.get(external_id)
-            if previous is not None and previous != request_id:
-                self.store.clear(previous)
-            self._request_aliases[external_id] = request_id
-        return {
-            "status": "ok",
-            "request_id": external_id,
-            "internal_request_id": receipt.request_id,
-            "registered": receipt.registered,
-            "draft_token_count": receipt.draft_token_count,
-            **dict(receipt.details),
-        }
-
     def register_draft_bundle(
         self,
         request_id: str,
@@ -816,15 +672,17 @@ class VLLMBoundaryProposer:
         boundary_token_ids: list[list[int]],
         prompt_token_count: int = 0,
         *,
-        candidate_ids: list[str | None] | None = None,
+        candidate_metadata: list[Mapping[str, Any]] | None = None,
         external_request_id: str | None = None,
     ) -> dict[str, Any]:
         if not draft_token_ids:
             raise ValueError("draft bundle must contain at least one candidate")
         if len(boundary_token_ids) != len(draft_token_ids):
             raise ValueError("every draft candidate needs boundary token IDs")
-        if candidate_ids is not None and len(candidate_ids) != len(draft_token_ids):
-            raise ValueError("candidate_ids must align with draft candidates")
+        if candidate_metadata is not None and len(candidate_metadata) != len(
+            draft_token_ids
+        ):
+            raise ValueError("candidate metadata must align with draft candidates")
         external_id = external_request_id or request_id
         drafts = tuple(
             DraftRequest(
@@ -833,11 +691,8 @@ class VLLMBoundaryProposer:
                 boundary=DraftBoundary(token_ids=tuple(boundary_token_ids[index])),
                 prompt_token_count=prompt_token_count,
                 metadata={
-                    "candidate_id": (
-                        candidate_ids[index]
-                        if candidate_ids is not None
-                        else str(index)
-                    )
+                    "candidate_id": str(index),
+                    **dict(candidate_metadata[index] if candidate_metadata else {}),
                 },
             )
             for index, tokens in enumerate(draft_token_ids)

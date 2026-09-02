@@ -35,9 +35,8 @@ which cannot report a per-request hit must use `cache_policy="prefer"` or
 
 ## Shared draft wiring
 
-All verified integrations consume the same boundary-relative `DraftRequest`;
-bundle-capable paths additionally accept an ordered `DraftBundle` of distinct
-alternatives for the same request.
+All verified integrations consume one ordered `DraftBundle` of boundary-relative
+alternatives; a single `DraftRequest` is carried as a bundle of size one.
 For a native engine, the engine itself can also be the feedback object:
 
 ```python

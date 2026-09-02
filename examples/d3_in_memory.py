@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 
 from self_speculation import (
     BoundaryDraftStore,
+    DraftBundle,
     DraftReceipt,
     DraftRequest,
     EngineCapabilities,
@@ -35,8 +36,8 @@ class SignalingFeedback:
         self.store = store
         self.ready = asyncio.Event()
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
-        receipt = self.store.register(draft)
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
+        receipt = self.store.register_bundle(bundle)
         self.ready.set()
         return receipt
 

@@ -6,6 +6,7 @@ import unittest
 from self_speculation import (
     BoundaryDraftStore,
     DraftBoundary,
+    DraftBundle,
     DraftRequest,
     InferenceRequest,
     LlamaCppBoundaryDraftModel,
@@ -84,11 +85,16 @@ class LlamaCppPythonEngineTest(unittest.IsolatedAsyncioTestCase):
         llama = FakeLlama(draft_model)
         engine = LlamaCppPythonEngine(llama, draft_model=draft_model)
         await engine.submit(
-            DraftRequest(
-                request_id="llama-main",
-                token_ids=(10, 11),
-                boundary=DraftBoundary(token_ids=(9,)),
-                prompt_token_count=1,
+            DraftBundle(
+                "llama-main",
+                (
+                    DraftRequest(
+                        request_id="llama-main",
+                        token_ids=(10, 11),
+                        boundary=DraftBoundary(token_ids=(9,)),
+                        prompt_token_count=1,
+                    ),
+                ),
             )
         )
 

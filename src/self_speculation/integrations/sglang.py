@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ..drafts import BoundaryDraftStore, DraftBoundary, DraftRequest
+from ..drafts import BoundaryDraftStore, DraftBoundary, DraftBundle, DraftRequest
 from ..drafts.http import HTTPDraftFeedback
 
 
@@ -147,7 +147,7 @@ def _prepare_draft_tokens(
         return original_result
     pending = getattr(worker, _PENDING_ATTRIBUTE, {})
     pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
-    resolved_pending: list[tuple[Any, tuple[int, ...], tuple[int, ...]]] = []
+    resolved_pending: list[tuple[Any, Mapping[str, Any]]] = []
     if pending_lock is not None:
         with pending_lock:
             for request in requests:
@@ -155,18 +155,10 @@ def _prepare_draft_tokens(
                 payload = pending.pop(request_id, None)
                 if payload is None:
                     continue
-                token_ids, boundary_token_ids = payload
-                resolved_pending.append(
-                    (request, token_ids, boundary_token_ids)
-                )
-    for request, token_ids, boundary_token_ids in resolved_pending:
-        store.register(
-            DraftRequest(
-                request_id=str(request.rid),
-                token_ids=token_ids,
-                boundary=DraftBoundary(token_ids=boundary_token_ids),
-                prompt_token_count=len(request.origin_input_ids),
-            )
+                resolved_pending.append((request, payload))
+    for request, payload in resolved_pending:
+        store.register_bundle(
+            _control_bundle(payload, prompt_token_count=len(request.origin_input_ids))
         )
     if store.snapshot().active_requests == 0:
         return original_result
@@ -215,40 +207,66 @@ def _prepare_draft_tokens(
     return rows.reshape(-1), trees.reshape(-1)
 
 
-def _register_control(worker: Any, payload: Mapping[str, Any]) -> int:
-    if payload.get("op") != "register":
-        raise SGLangIntegrationError("expected a register control payload")
+def _control_bundle(
+    payload: Mapping[str, Any], *, prompt_token_count: int | None = None
+) -> DraftBundle:
     request_id = str(payload.get("request_id") or "")
     if not request_id:
         raise SGLangIntegrationError("request_id is required")
-    token_ids = _token_ids(payload.get("token_ids"), "token_ids")
-    boundary_token_ids = _token_ids(
-        payload.get("boundary_token_ids"), "boundary_token_ids"
-    )
+    raw_drafts = payload.get("drafts")
+    if not isinstance(raw_drafts, list) or not raw_drafts:
+        raise SGLangIntegrationError("drafts must be a non-empty array")
+    drafts = []
+    for raw in raw_drafts:
+        if not isinstance(raw, Mapping):
+            raise SGLangIntegrationError("every draft must be an object")
+        metadata = raw.get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            raise SGLangIntegrationError("draft metadata must be an object")
+        observed_prompt_count = raw.get("prompt_token_count")
+        drafts.append(
+            DraftRequest(
+                request_id=request_id,
+                token_ids=_token_ids(raw.get("token_ids"), "token_ids"),
+                boundary=DraftBoundary(
+                    token_ids=_token_ids(
+                        raw.get("boundary_token_ids"), "boundary_token_ids"
+                    )
+                ),
+                prompt_token_count=(
+                    prompt_token_count
+                    if observed_prompt_count is None
+                    else int(observed_prompt_count)
+                ),
+                metadata=dict(metadata),
+            )
+        )
+    return DraftBundle(request_id=request_id, drafts=tuple(drafts))
+
+
+def _register_control(worker: Any, payload: Mapping[str, Any]) -> int:
+    if payload.get("op") != "replace":
+        raise SGLangIntegrationError("expected a replace control payload")
+    bundle = _control_bundle(payload)
     store = _store(worker, required=True)
-    prompt_token_count = payload.get("prompt_token_count")
-    if prompt_token_count is None:
+    if any(draft.prompt_token_count is None for draft in bundle.drafts):
         pending = getattr(worker, _PENDING_ATTRIBUTE, None)
         pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
         if not isinstance(pending, dict) or pending_lock is None:
             raise SGLangIntegrationError("SGLang pending draft state is unavailable")
-        store.clear(request_id)
+        store.clear(bundle.request_id)
         with pending_lock:
-            pending[request_id] = (token_ids, boundary_token_ids)
-        return min(len(token_ids), store.max_draft_tokens)
+            pending[bundle.request_id] = dict(payload)
+        return min(
+            max(len(draft.token_ids) for draft in bundle.drafts),
+            store.max_draft_tokens,
+        )
     pending = getattr(worker, _PENDING_ATTRIBUTE, None)
     pending_lock = getattr(worker, _PENDING_LOCK_ATTRIBUTE, None)
     if isinstance(pending, dict) and pending_lock is not None:
         with pending_lock:
-            pending.pop(request_id, None)
-    receipt = store.register(
-        DraftRequest(
-            request_id=request_id,
-            token_ids=token_ids,
-            boundary=DraftBoundary(token_ids=boundary_token_ids),
-            prompt_token_count=int(prompt_token_count),
-        )
-    )
+            pending.pop(bundle.request_id, None)
+    receipt = store.register_bundle(bundle)
     return int(receipt.draft_token_count or 0)
 
 
@@ -400,19 +418,30 @@ class SGLangHTTPDraftFeedback(HTTPDraftFeedback):
         kwargs.setdefault("name", "sglang-http-draft-feedback")
         super().__init__(base_url, **kwargs)
 
-    def submit_payload(self, draft: DraftRequest) -> Mapping[str, Any]:
-        if not draft.token_ids:
-            raise ValueError("SGLang draft feedback requires token_ids")
-        if draft.boundary is None or not draft.boundary.token_ids:
-            raise ValueError("SGLang draft feedback requires boundary token_ids")
+    def submit_payload(self, bundle: DraftBundle) -> Mapping[str, Any]:
+        for draft in bundle.drafts:
+            if not draft.token_ids:
+                raise ValueError("SGLang draft feedback requires token_ids")
+            if draft.boundary is None or not draft.boundary.token_ids:
+                raise ValueError("SGLang draft feedback requires boundary token_ids")
         return {
             "corpus_id": _encode_control(
                 {
-                    "op": "register",
-                    "request_id": draft.request_id,
-                    "token_ids": list(draft.token_ids),
-                    "boundary_token_ids": list(draft.boundary.token_ids),
-                    "prompt_token_count": draft.prompt_token_count,
+                    "op": "replace",
+                    "request_id": bundle.request_id,
+                    "drafts": [
+                        {
+                            "token_ids": list(draft.token_ids),
+                            "boundary_token_ids": list(
+                                draft.boundary.token_ids
+                                if draft.boundary is not None
+                                else ()
+                            ),
+                            "prompt_token_count": draft.prompt_token_count,
+                            "metadata": dict(draft.metadata),
+                        }
+                        for draft in bundle.drafts
+                    ],
                 }
             ),
             # The native route currently requires documents even though the

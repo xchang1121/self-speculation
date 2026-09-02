@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
-from .base import DraftReceipt, DraftRequest, DraftVerificationOutcome
+from .base import DraftBundle, DraftReceipt, DraftRequest, DraftVerificationOutcome
 from .callable import normalize_draft_receipt
 
 if TYPE_CHECKING:
@@ -36,22 +36,29 @@ def _boundary_payload(draft: DraftRequest) -> dict[str, Any] | None:
     }
 
 
-def _tool_call_payload(draft: DraftRequest) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": call.name,
-            "arguments": call.arguments,
-            "id": call.call_id,
-            "index": call.index,
-            "format": call.format,
-            "raw": call.raw,
-        }
-        for call in draft.tool_calls
-    ]
+def _draft_payload(draft: DraftRequest) -> dict[str, Any]:
+    return {
+        "text": draft.text,
+        "token_ids": list(draft.token_ids),
+        "boundary": _boundary_payload(draft),
+        "prompt_token_count": draft.prompt_token_count,
+        "tool_calls": [
+            {
+                "name": call.name,
+                "arguments": call.arguments,
+                "id": call.call_id,
+                "index": call.index,
+                "format": call.format,
+                "raw": call.raw,
+            }
+            for call in draft.tool_calls
+        ],
+        "metadata": dict(draft.metadata),
+    }
 
 
 class HTTPDraftFeedback:
-    """Send portable draft registration and cleanup requests to a sidecar.
+    """Replace request-scoped draft candidates through a sidecar.
 
     The default contract is ``POST /drafts`` followed by
     ``DELETE /drafts/{request_id}``. Subclasses can override payload methods for
@@ -95,15 +102,11 @@ class HTTPDraftFeedback:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def submit_payload(self, draft: DraftRequest) -> Mapping[str, Any]:
+    def submit_payload(self, bundle: DraftBundle) -> Mapping[str, Any]:
         return {
-            "request_id": draft.request_id,
-            "text": draft.text,
-            "token_ids": list(draft.token_ids),
-            "boundary": _boundary_payload(draft),
-            "prompt_token_count": draft.prompt_token_count,
-            "tool_calls": _tool_call_payload(draft),
-            "metadata": dict(draft.metadata),
+            "request_id": bundle.request_id,
+            "drafts": [_draft_payload(draft) for draft in bundle.drafts],
+            "metadata": dict(bundle.metadata),
         }
 
     def clear_payload(self, request_id: str) -> Mapping[str, Any] | None:
@@ -128,16 +131,16 @@ class HTTPDraftFeedback:
                 raise DraftFeedbackHTTPError(str(payload.get("error") or payload))
         return payload
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         response = await self._client.post(
             self._url(self.submit_path),
-            json=dict(self.submit_payload(draft)),
+            json=dict(self.submit_payload(bundle)),
             headers=self._headers(),
             timeout=self.timeout,
         )
         response.raise_for_status()
         payload = self._response_payload(response)
-        return normalize_draft_receipt(payload, draft)
+        return normalize_draft_receipt(payload, bundle)
 
     async def clear(
         self, request_id: str
@@ -187,7 +190,10 @@ class SporkHTTPDraftFeedback(HTTPDraftFeedback):
         kwargs.setdefault("name", "spork-http-draft-feedback")
         super().__init__(base_url, **kwargs)
 
-    def submit_payload(self, draft: DraftRequest) -> Mapping[str, Any]:
+    def submit_payload(self, bundle: DraftBundle) -> Mapping[str, Any]:
+        if len(bundle.drafts) != 1:
+            raise ValueError("original SPORK feedback accepts one draft only")
+        draft = bundle.drafts[0]
         if not draft.token_ids:
             raise ValueError("SPORK HTTP feedback requires tokenized draft content")
         return {

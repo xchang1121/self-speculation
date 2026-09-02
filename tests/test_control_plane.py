@@ -142,7 +142,7 @@ class RecordingBundleFeedback:
         self.bundles: list[DraftBundle] = []
         self.cleared: list[str] = []
 
-    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         self.bundles.append(bundle)
         return DraftReceipt(
             request_id=bundle.request_id,
@@ -161,11 +161,11 @@ class GatedBundleFeedback(RecordingBundleFeedback):
         self.slow_started = asyncio.Event()
         self.release_slow = asyncio.Event()
 
-    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         if bundle.request_id == "slow":
             self.slow_started.set()
             await self.release_slow.wait()
-        return await super().submit_bundle(bundle)
+        return await super().submit(bundle)
 
 
 class ForkEngine:

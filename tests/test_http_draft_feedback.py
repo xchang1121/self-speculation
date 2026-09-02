@@ -6,6 +6,7 @@ import unittest
 import httpx
 
 from self_speculation import (
+    DraftBundle,
     DraftBoundary,
     DraftFeedbackHTTPError,
     DraftRequest,
@@ -13,6 +14,10 @@ from self_speculation import (
     SporkHTTPDraftFeedback,
     ToolCall,
 )
+
+
+def bundle(draft: DraftRequest) -> DraftBundle:
+    return DraftBundle(draft.request_id, (draft,))
 
 
 class HTTPDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
@@ -45,14 +50,14 @@ class HTTPDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
             tool_calls=(ToolCall("search", {"q": "x"}, format="tagged_json"),),
             metadata={"source": "fork"},
         )
-        receipt = await feedback.submit(draft)
+        receipt = await feedback.submit(bundle(draft))
         await feedback.clear(draft.request_id)
 
         body = json.loads(requests[0].content)
         self.assertEqual(str(requests[0].url), "http://engine/drafts")
         self.assertEqual(requests[0].headers["authorization"], "Bearer secret")
-        self.assertEqual(body["boundary"]["token_ids"], [9])
-        self.assertEqual(body["tool_calls"][0]["name"], "search")
+        self.assertEqual(body["drafts"][0]["boundary"]["token_ids"], [9])
+        self.assertEqual(body["drafts"][0]["tool_calls"][0]["name"], "search")
         self.assertEqual(receipt.accepted_token_count, 2)
         self.assertEqual(requests[1].method, "DELETE")
         self.assertEqual(str(requests[1].url), "http://engine/drafts/turn%2Fone")
@@ -72,13 +77,13 @@ class HTTPDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         feedback = SporkHTTPDraftFeedback("http://vllm", client=client)
-        receipt = await feedback.submit(
+        receipt = await feedback.submit(bundle(
             DraftRequest(
                 request_id="r",
                 token_ids=(4, 5, 6),
                 prompt_token_count=11,
             )
-        )
+        ))
         await feedback.clear("r")
 
         self.assertEqual(
@@ -139,9 +144,9 @@ class HTTPDraftFeedbackTest(unittest.IsolatedAsyncioTestCase):
         )
         spork = SporkHTTPDraftFeedback("http://vllm", client=client)
         with self.assertRaisesRegex(ValueError, "tokenized"):
-            await spork.submit(DraftRequest(request_id="r", text="raw"))
+            await spork.submit(bundle(DraftRequest(request_id="r", text="raw")))
         with self.assertRaisesRegex(DraftFeedbackHTTPError, "no drafter"):
-            await spork.submit(DraftRequest(request_id="r", token_ids=(1,)))
+            await spork.submit(bundle(DraftRequest(request_id="r", token_ids=(1,))))
         await client.aclose()
 
 

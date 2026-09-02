@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .decoding import DecoderFactory, ToolCallDecoder
-from .drafts import DraftBuilder, DraftFeedback, DraftReceipt, DraftRequest
+from .drafts import DraftBuilder, DraftBundle, DraftFeedback, DraftReceipt, DraftRequest
 from .engines import InferenceEngine, validate_request
 from .events import (
     DraftClearedEvent,
@@ -111,7 +111,9 @@ class ForkController:
         except Exception as error:
             raise _DraftOperationError("build", error) from error
         try:
-            receipt = await self.draft_feedback.submit(draft)
+            receipt = await self.draft_feedback.submit(
+                DraftBundle(request_id=draft.request_id, drafts=(draft,))
+            )
         except Exception as error:
             raise _DraftOperationError("submit", error) from error
         if not isinstance(receipt, DraftReceipt):

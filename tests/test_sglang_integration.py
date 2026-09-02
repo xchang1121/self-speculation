@@ -9,6 +9,7 @@ import numpy as np
 
 from self_speculation import (
     DraftBoundary,
+    DraftBundle,
     DraftRequest,
     SGLangHTTPDraftFeedback,
 )
@@ -72,10 +73,25 @@ class SGLangIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         feedback = SGLangHTTPDraftFeedback("http://sglang", client=client)
         receipt = await feedback.submit(
-            DraftRequest(
+            DraftBundle(
                 request_id="main-request",
-                token_ids=(10, 11),
-                boundary=DraftBoundary(token_ids=(9,)),
+                drafts=(
+                    DraftRequest(
+                        request_id="main-request",
+                        token_ids=(10, 11),
+                        boundary=DraftBoundary(token_ids=(9,)),
+                        metadata={
+                            "candidate_id": "fork",
+                            "sources": ["actor-fork"],
+                        },
+                    ),
+                    DraftRequest(
+                        request_id="main-request",
+                        token_ids=(10, 12),
+                        boundary=DraftBoundary(token_ids=(9,)),
+                        metadata={"candidate_id": "drafter", "sources": ["drafter"]},
+                    ),
+                ),
             )
         )
         self.assertEqual(
@@ -119,8 +135,21 @@ class SGLangIntegrationTest(unittest.IsolatedAsyncioTestCase):
             getattr(worker, integration._STORE_ATTRIBUTE).snapshot().injections,
             1,
         )
+        self.assertEqual(
+            getattr(worker, integration._STORE_ATTRIBUTE)
+            .snapshot()
+            .registered_candidates,
+            2,
+        )
         self.assertEqual(getattr(worker, integration._PENDING_ATTRIBUTE), {})
-        self.assertEqual(json.loads(requests[0].content)["documents"], ["_"])
+        submit_body = json.loads(requests[0].content)
+        self.assertEqual(submit_body["documents"], ["_"])
+        control = integration._decode_control(submit_body["corpus_id"])
+        self.assertIsNotNone(control)
+        self.assertEqual(
+            [item["metadata"]["candidate_id"] for item in control["drafts"]],
+            ["fork", "drafter"],
+        )
 
         await feedback.clear("main-request")
         self.assertEqual(
@@ -136,11 +165,16 @@ class SGLangIntegrationTest(unittest.IsolatedAsyncioTestCase):
         feedback = SGLangHTTPDraftFeedback("http://sglang", client=client)
         with self.assertRaisesRegex(ValueError, "boundary token_ids"):
             await feedback.submit(
-                DraftRequest(
-                    request_id="r",
-                    token_ids=(1,),
-                    boundary=DraftBoundary(text="<tool>"),
-                    prompt_token_count=2,
+                DraftBundle(
+                    "r",
+                    (
+                        DraftRequest(
+                            request_id="r",
+                            token_ids=(1,),
+                            boundary=DraftBoundary(text="<tool>"),
+                            prompt_token_count=2,
+                        ),
+                    ),
                 )
             )
         await client.aclose()
@@ -209,11 +243,15 @@ class SGLangIntegrationTest(unittest.IsolatedAsyncioTestCase):
         integration._worker_init(initialize_worker, worker)
         control_id = integration._encode_control(
             {
-                "op": "register",
+                "op": "replace",
                 "request_id": "r",
-                "token_ids": [10],
-                "boundary_token_ids": [9],
-                "prompt_token_count": 1,
+                "drafts": [
+                    {
+                        "token_ids": [10],
+                        "boundary_token_ids": [9],
+                        "prompt_token_count": 1,
+                    }
+                ],
             }
         )
         manager = SimpleNamespace(

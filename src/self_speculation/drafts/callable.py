@@ -8,11 +8,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .base import DraftReceipt, DraftRequest, DraftVerificationOutcome
+from .base import DraftBundle, DraftReceipt, DraftVerificationOutcome
 
 
 SubmitResult = DraftReceipt | Mapping[str, Any] | bool | None
-DraftSubmitter = Callable[[DraftRequest], SubmitResult | Awaitable[SubmitResult]]
+DraftSubmitter = Callable[[DraftBundle], SubmitResult | Awaitable[SubmitResult]]
 DraftClearer = Callable[[str], Any | Awaitable[Any]]
 
 
@@ -48,21 +48,28 @@ def _registered(payload: Mapping[str, Any]) -> bool:
 
 def normalize_draft_receipt(
     result: SubmitResult,
-    draft: DraftRequest,
+    bundle: DraftBundle,
 ) -> DraftReceipt:
     """Normalize common adapter return shapes and preserve raw details."""
 
     if isinstance(result, DraftReceipt):
-        if result.request_id != draft.request_id:
+        if result.request_id != bundle.request_id:
             raise ValueError("draft receipt request_id does not match the request")
         return result
     if isinstance(result, Mapping):
-        request_id = str(result.get("request_id") or draft.request_id)
-        if request_id != draft.request_id:
+        request_id = str(result.get("request_id") or bundle.request_id)
+        if request_id != bundle.request_id:
             raise ValueError("draft receipt request_id does not match the request")
+        details = dict(result)
+        if isinstance(result.get("details"), Mapping):
+            details.update(result["details"])
         draft_count = result.get(
             "draft_token_count",
-            result.get("n_tokens", len(draft.token_ids) or None),
+            result.get(
+                "n_tokens",
+                max((len(draft.token_ids) for draft in bundle.drafts), default=0)
+                or None,
+            ),
         )
         accepted_count = result.get(
             "accepted_token_count", result.get("accepted_tokens")
@@ -74,13 +81,15 @@ def normalize_draft_receipt(
             accepted_token_count=_optional_int(
                 accepted_count, "accepted_token_count"
             ),
-            details=dict(result),
+            details=details,
         )
     if result is None or isinstance(result, bool):
         return DraftReceipt(
-            request_id=draft.request_id,
+            request_id=bundle.request_id,
             registered=True if result is None else result,
-            draft_token_count=len(draft.token_ids) or None,
+            draft_token_count=max(
+                (len(draft.token_ids) for draft in bundle.drafts), default=0
+            ) or None,
         )
     raise TypeError(
         "draft submitter must return DraftReceipt, mapping, bool, or None"
@@ -95,9 +104,10 @@ class CallableDraftFeedback:
     clearer: DraftClearer | None = None
     name: str = "callable-draft-feedback"
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
-        result = await _invoke(self.submitter, draft)
-        return normalize_draft_receipt(result, draft)
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
+        return normalize_draft_receipt(
+            await _invoke(self.submitter, bundle), bundle
+        )
 
     async def clear(
         self, request_id: str

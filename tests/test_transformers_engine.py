@@ -7,6 +7,7 @@ import unittest
 from self_speculation import (
     BoundaryDraftStore,
     DraftBoundary,
+    DraftBundle,
     DraftRequest,
     InferenceRequest,
     TransformersEngine,
@@ -244,12 +245,17 @@ class TransformersEngineTest(unittest.IsolatedAsyncioTestCase):
         generated = tuple(int(token) for token in baseline[0, 3:].tolist())
         self.assertEqual(len(generated), 4)
         store = BoundaryDraftStore(max_draft_tokens=2)
-        store.register(
-            DraftRequest(
-                request_id="transformers-d3",
-                token_ids=generated[1:3],
-                boundary=DraftBoundary(token_ids=(generated[0],)),
-                prompt_token_count=3,
+        store.register_bundle(
+            DraftBundle(
+                "transformers-d3",
+                (
+                    DraftRequest(
+                        request_id="transformers-d3",
+                        token_ids=generated[1:3],
+                        boundary=DraftBoundary(token_ids=(generated[0],)),
+                        prompt_token_count=3,
+                    ),
+                ),
             )
         )
         engine = TransformersEngine(

@@ -16,7 +16,7 @@ from .decoding import default_decoder
 from .drafts import (
     DraftBoundary,
     DraftBundle,
-    DraftBundleFeedback,
+    DraftFeedback,
     DraftReceipt,
     DraftRequest,
     DraftTokenizer,
@@ -513,7 +513,7 @@ class SelfSpeculationControlPlane:
 
     def __init__(
         self,
-        feedback: DraftBundleFeedback,
+        feedback: DraftFeedback,
         candidate_builder: CandidateBundleBuilder,
         *,
         fork_runner: SnapshotForkRunner | None = None,
@@ -539,7 +539,7 @@ class SelfSpeculationControlPlane:
             self._ensure_open(request_id, state)
             state.external = bundle
             combined = self._combined(bundle.request_id, state)
-            receipt = await self.feedback.submit_bundle(combined)
+            receipt = await self.feedback.submit(combined)
             return _receipt_with_bundle_observation(receipt, combined)
 
     async def fork(self, payload: Mapping[str, Any]) -> DraftReceipt:
@@ -552,7 +552,7 @@ class SelfSpeculationControlPlane:
             self._ensure_open(request_id, state)
             state.self_draft = draft
             combined = self._combined(draft.request_id, state)
-            receipt = await self.feedback.submit_bundle(combined)
+            receipt = await self.feedback.submit(combined)
             return _receipt_with_bundle_observation(receipt, combined)
 
     async def clear(

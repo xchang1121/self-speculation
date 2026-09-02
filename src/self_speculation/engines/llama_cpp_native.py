@@ -13,6 +13,7 @@ from typing import Any
 
 from ..drafts import (
     BoundaryDraftStore,
+    DraftBundle,
     DraftReceipt,
     DraftRequest,
     DraftVerificationOutcome,
@@ -271,10 +272,10 @@ class LlamaCppPythonEngine:
     async def prompt_token_count(self, request: InferenceRequest) -> int:
         return len(self.tokenize_text(await self.render_prompt(request)))
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         if self.draft_model is None:
             raise RuntimeError("LlamaCppPythonEngine has no configured draft model")
-        return self.draft_model.store.register(draft)
+        return self.draft_model.store.register_bundle(bundle)
 
     async def clear(
         self, request_id: str

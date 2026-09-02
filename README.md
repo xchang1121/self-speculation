@@ -172,10 +172,10 @@ controller = ForkController(
 ## D3 draft feedback
 
 Decoding a fork predicts an action batch, but it only accelerates main-model token
-generation when the engine can verify that prediction through its speculative
-decoding path. `ToolCallDraftBuilder` formats and tokenizes all calls after their
-model-specific boundary; a `DraftFeedback` adapter then registers it under the
-main request ID.
+generation when the engine verifies that prediction through its speculative
+decoding path. `ToolCallDraftBuilder` formats and tokenizes calls after their
+model-specific boundary; `DraftFeedback` atomically replaces the main request's
+ordered candidate set. A single prediction uses the same path as a set of one.
 
 | Feedback path | Intended use |
 | --- | --- |

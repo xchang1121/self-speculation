@@ -5,6 +5,7 @@ import unittest
 from collections.abc import AsyncIterator
 
 from self_speculation import (
+    DraftBundle,
     DraftFailedEvent,
     DraftReceipt,
     DraftRequest,
@@ -31,15 +32,15 @@ class RecordingFeedback:
         self.cleared: list[str] = []
         self.main_finished = False
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
-        self.drafts.append(draft)
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
+        self.drafts.extend(bundle.drafts)
         self.submitted.set()
         if self.fail_submit:
             raise RuntimeError("submit failed")
         return DraftReceipt(
-            request_id=draft.request_id,
+            request_id=bundle.request_id,
             registered=True,
-            draft_token_count=len(draft.token_ids),
+            draft_token_count=max(len(draft.token_ids) for draft in bundle.drafts),
         )
 
     async def clear(self, request_id: str) -> None:

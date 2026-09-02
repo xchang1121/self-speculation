@@ -66,8 +66,8 @@ curl http://127.0.0.1:8000/self-speculation/status
 At least one worker result should have `"status":"ok"`. Pipeline stages that
 do not own the proposer report `"status":"skipped"` and are expected.
 
-The endpoint exposes `POST /self-speculation/drafts`, `/draft-bundles`,
-`/candidates`, and `/clear`. The concrete-candidate route tokenizes every
+The endpoint exposes `POST /self-speculation/draft-bundles`, `/candidates`, and
+`/clear`. The concrete-candidate route tokenizes every
 boundary-relative tool-call body with the target tokenizer exposed by vLLM's
 engine client, then registers one ordered bundle. Registration waits for the
 matching main request to become active for a bounded interval, covering the

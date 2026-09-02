@@ -269,26 +269,11 @@ class DraftVerificationOutcome:
 
 @runtime_checkable
 class DraftFeedback(Protocol):
-    """Optional side channel implemented by D3-capable engines."""
+    """Replace the ordered D3 candidates for one active target request."""
 
     name: str
 
-    async def submit(self, draft: DraftRequest) -> DraftReceipt:
-        ...
-
-    async def clear(
-        self, request_id: str
-    ) -> DraftVerificationOutcome | None:
-        ...
-
-
-@runtime_checkable
-class DraftBundleFeedback(Protocol):
-    """Optional multi-candidate extension to :class:`DraftFeedback`."""
-
-    name: str
-
-    async def submit_bundle(self, bundle: DraftBundle) -> DraftReceipt:
+    async def submit(self, bundle: DraftBundle) -> DraftReceipt:
         ...
 
     async def clear(

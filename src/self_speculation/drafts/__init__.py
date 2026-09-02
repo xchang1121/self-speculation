@@ -2,7 +2,6 @@
 
 from .base import (
     DraftBundle,
-    DraftBundleFeedback,
     DraftBoundary,
     DraftBuilder,
     DraftFeedback,
@@ -35,7 +34,6 @@ __all__ = [
     "BoundaryDraftStore",
     "BoundaryTokenizer",
     "DraftBundle",
-    "DraftBundleFeedback",
     "DraftBoundary",
     "DraftBuilder",
     "DraftClearer",
