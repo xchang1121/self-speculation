@@ -23,6 +23,16 @@ request-scoped external candidates, the decoded action cannot enter their
 verifier. Supporting that path would require a server fork or a new upstream
 endpoint.
 
+## Cache-hit contract
+
+The portable fork path normalizes actual cache reads as
+`usage["cache_read_tokens"]`. The sidecar's strict default admits a draft only
+after observing a positive value; `prefix_cache=True` by itself is merely
+configuration, not proof. Custom engines can join the same path by declaring
+`cache_read_reporting=True` and emitting that normalized counter. Opaque APIs
+which cannot report a per-request hit must use `cache_policy="prefer"` or
+`"off"`, and are deliberately reported as unverified.
+
 ## Shared draft wiring
 
 All verified integrations consume the same boundary-relative `DraftRequest`;

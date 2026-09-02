@@ -12,6 +12,7 @@ def output(
     *,
     finished: bool = False,
     finish_reason: str | None = None,
+    cached_tokens: int | None = 0,
 ):
     item = SimpleNamespace(
         text=text,
@@ -23,6 +24,7 @@ def output(
         outputs=[item],
         finished=finished,
         prompt_token_ids=[10, 11],
+        num_cached_tokens=cached_tokens,
     )
 
 
@@ -84,6 +86,7 @@ class VLLMNativeEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([chunk.token_ids for chunk in chunks], [(1,), (2, 3)])
         self.assertEqual(chunks[-1].finish_reason, "length")
         self.assertEqual(chunks[-1].usage["completion_tokens"], 3)
+        self.assertEqual(chunks[-1].usage["cache_read_tokens"], 0)
         self.assertEqual(native.calls[0]["prompt"], "P")
         self.assertEqual(native.aborted, [])
 

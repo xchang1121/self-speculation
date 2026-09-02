@@ -210,6 +210,39 @@ class OpenAICompatibleEngineTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(vllm_body["request_id"], "stable-id")
         self.assertEqual(sglang_body["rid"], "stable-id")
+        self.assertEqual(vllm_body["stream_options"], {"include_usage": True})
+        self.assertEqual(sglang_body["stream_options"], {"include_usage": True})
+        await client.aclose()
+
+    async def test_normalizes_server_cache_accounting(self) -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    content=sse(
+                        {
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 20,
+                                "prompt_tokens_details": {"cached_tokens": 16},
+                            },
+                        }
+                    ),
+                )
+            )
+        )
+        engine = VLLMEngine(
+            "http://engine/v1",
+            client=client,
+            prefix_cache=True,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in engine.stream(InferenceRequest(prompt="prompt"))
+        ]
+
+        self.assertEqual(chunks[0].usage["cache_read_tokens"], 16)
         await client.aclose()
 
 

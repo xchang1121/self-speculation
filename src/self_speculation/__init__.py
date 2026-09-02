@@ -34,9 +34,12 @@ from .decoding import (
 from .engines import (
     CallableEngine,
     ChunkMapper,
+    EngineCacheReuseError,
     EngineCapabilityError,
     EngineContextLimitError,
     InferenceEngine,
+    ForkCacheEvidence,
+    ForkCachePolicy,
     LlamaCppBoundaryDraftModel,
     LlamaCppDraftRequestPredicate,
     LlamaCppEngine,
@@ -62,7 +65,9 @@ from .engines import (
     VLLMNativeEngine,
     default_chunk_mapper,
     fit_request_to_context,
+    validate_fork_cache,
     validate_request,
+    verify_fork_cache,
 )
 from .forks import (
     CallableForkBuilder,
@@ -140,6 +145,7 @@ __all__ = [
     "BoundaryDraftStore",
     "BoundaryTokenizer",
     "EngineCapabilities",
+    "EngineCacheReuseError",
     "EngineCapabilityError",
     "EngineContextLimitError",
     "CallableEngine",
@@ -175,6 +181,8 @@ __all__ = [
     "ForkCompletedEvent",
     "ForkController",
     "ForkContinuation",
+    "ForkCacheEvidence",
+    "ForkCachePolicy",
     "ForkEvent",
     "ForkFailedEvent",
     "ForkRequestBuilder",
@@ -245,6 +253,7 @@ __all__ = [
     "default_draft_boundary",
     "default_chunk_mapper",
     "fit_request_to_context",
+    "validate_fork_cache",
     "default_parser_registry",
     "first_output_trigger",
     "format_tool_call_draft",
@@ -254,4 +263,5 @@ __all__ = [
     "install_sglang_plugin",
     "install_self_speculation_routes",
     "validate_request",
+    "verify_fork_cache",
 ]

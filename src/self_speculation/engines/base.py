@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from ..models import EngineCapabilities, InferenceRequest, StreamChunk
 
@@ -15,6 +15,43 @@ class EngineCapabilityError(ValueError):
 
 class EngineContextLimitError(EngineCapabilityError):
     """Raised when an exact prompt leaves no room for a fork completion."""
+
+
+class EngineCacheReuseError(EngineCapabilityError):
+    """Raised when a fork cannot prove that it reused Actor KV state."""
+
+
+ForkCachePolicy = Literal["required", "prefer", "off"]
+
+
+@dataclass(frozen=True, slots=True)
+class ForkCacheEvidence:
+    """Per-request proof derived from normalized engine cache accounting."""
+
+    policy: ForkCachePolicy
+    configured: bool
+    reported: bool
+    reused_tokens: int
+    prompt_tokens: int | None = None
+
+    @property
+    def verified(self) -> bool:
+        return self.reported and self.reused_tokens > 0
+
+    def to_mapping(self) -> dict[str, int | float | bool | str | None]:
+        return {
+            "policy": self.policy,
+            "configured": self.configured,
+            "reported": self.reported,
+            "verified": self.verified,
+            "reused_tokens": self.reused_tokens,
+            "prompt_tokens": self.prompt_tokens,
+            "hit_rate": (
+                self.reused_tokens / self.prompt_tokens
+                if self.prompt_tokens
+                else None
+            ),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +87,45 @@ def validate_request(engine: InferenceEngine, request: InferenceRequest) -> None
         raise EngineCapabilityError(
             f"engine {engine.name!r} does not support {request.input_mode} requests"
         )
+
+
+def validate_fork_cache(
+    engine: InferenceEngine,
+    policy: ForkCachePolicy,
+) -> None:
+    if policy not in ("required", "prefer", "off"):
+        raise ValueError("fork cache policy must be required, prefer, or off")
+    if policy != "required":
+        return
+    if engine.capabilities.prefix_cache is not True:
+        raise EngineCacheReuseError(
+            f"engine {engine.name!r} does not guarantee prefix caching"
+        )
+    if not engine.capabilities.cache_read_reporting:
+        raise EngineCacheReuseError(
+            f"engine {engine.name!r} cannot report per-request cache reuse"
+        )
+
+
+def verify_fork_cache(
+    engine: InferenceEngine,
+    policy: ForkCachePolicy,
+    *,
+    reused_tokens: int,
+    prompt_tokens: int | None,
+) -> ForkCacheEvidence:
+    evidence = ForkCacheEvidence(
+        policy=policy,
+        configured=engine.capabilities.prefix_cache is True,
+        reported=engine.capabilities.cache_read_reporting,
+        reused_tokens=max(0, reused_tokens),
+        prompt_tokens=prompt_tokens,
+    )
+    if policy == "required" and not evidence.verified:
+        raise EngineCacheReuseError(
+            f"engine {engine.name!r} reported no KV-cache reuse for the fork"
+        )
+    return evidence
 
 
 async def fit_request_to_context(

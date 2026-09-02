@@ -80,6 +80,7 @@ class VLLMNativeEngine:
             token_ids=True,
             logprobs=True,
             prefix_cache=prefix_cache,
+            cache_read_reporting=True,
             max_context_tokens=max_context_tokens,
         )
 
@@ -202,6 +203,7 @@ class VLLMNativeEngine:
                     finish_reason = "stop"
                 completed = completed or finished
                 prompt_ids = getattr(request_output, "prompt_token_ids", ()) or ()
+                cached_tokens = getattr(request_output, "num_cached_tokens", None)
                 yield StreamChunk(
                     text=delta_text,
                     token_ids=delta_ids,
@@ -211,6 +213,11 @@ class VLLMNativeEngine:
                         "prompt_tokens": len(prompt_ids),
                         "completion_tokens": len(previous_ids),
                         "total_tokens": len(prompt_ids) + len(previous_ids),
+                        **(
+                            {"cache_read_tokens": int(cached_tokens)}
+                            if cached_tokens is not None
+                            else {}
+                        ),
                     },
                     raw=request_output,
                 )

@@ -235,6 +235,13 @@ two fields separately. Signed or otherwise structured reasoning without a
 matching text envelope is rejected; that path requires an engine-native fork
 which preserves the provider state instead of fabricating text.
 
+`SnapshotForkRunner` also defaults to `cache_policy="required"`. A declaration
+that prefix caching is enabled is not enough: the adapter must expose the
+fork's per-request cache-read token count and that count must be positive.
+Native vLLM reads `RequestOutput.num_cached_tokens`; vLLM and SGLang HTTP
+adapters request and normalize their usage reports. `prefer` and `off` remain
+available for experiments, but their receipts do not claim a verified hit.
+
 Its portable FastAPI routes are:
 
 | Route | Purpose |

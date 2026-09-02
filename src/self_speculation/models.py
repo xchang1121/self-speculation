@@ -166,6 +166,7 @@ class EngineCapabilities:
     token_ids: bool = False
     logprobs: bool = False
     prefix_cache: bool | None = None
+    cache_read_reporting: bool = False
     draft_feedback: bool = False
     max_context_tokens: int | None = None
 

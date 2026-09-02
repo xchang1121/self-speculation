@@ -25,7 +25,14 @@ from .drafts import (
     default_draft_boundary,
     format_tool_call_draft,
 )
-from .engines import InferenceEngine, fit_request_to_context, validate_request
+from .engines import (
+    ForkCachePolicy,
+    InferenceEngine,
+    fit_request_to_context,
+    validate_fork_cache,
+    validate_request,
+    verify_fork_cache,
+)
 from .forks import PrefixForkBuilder, PromptRenderer, render_fork_base
 from .models import InferenceRequest, StreamSnapshot, TokenLogprob, ToolCall
 
@@ -254,6 +261,7 @@ class SnapshotForkRunner:
     prompt_renderer: PromptRenderer | None = None
     default_format: str = "tagged_json"
     max_draft_tokens: int = 28
+    cache_policy: ForkCachePolicy = "required"
     continuation_planner: ContinuationPlanner = field(
         default_factory=ContinuationPlanner
     )
@@ -261,6 +269,7 @@ class SnapshotForkRunner:
     def __post_init__(self) -> None:
         if self.max_draft_tokens <= 0:
             raise ValueError("max_draft_tokens must be positive")
+        validate_fork_cache(self.engine, self.cache_policy)
 
     async def run(self, payload: Mapping[str, Any]) -> DraftRequest:
         fork_started_at = time.perf_counter()
@@ -349,6 +358,8 @@ class SnapshotForkRunner:
         output_chunks = 0
         decoded_tokens = 0
         logprob_tokens: list[TokenLogprob] = []
+        cache_read_tokens = 0
+        reported_prompt_tokens: int | None = None
         try:
             async for chunk in iterator:
                 if first_chunk_ms is None:
@@ -356,6 +367,12 @@ class SnapshotForkRunner:
                 output_chunks += int(chunk.has_output)
                 decoded_tokens += max(len(chunk.token_ids), len(chunk.logprobs))
                 logprob_tokens.extend(chunk.logprobs)
+                cache_read_tokens = max(
+                    cache_read_tokens,
+                    int(chunk.usage.get("cache_read_tokens", 0)),
+                )
+                if chunk.usage.get("prompt_tokens") is not None:
+                    reported_prompt_tokens = int(chunk.usage["prompt_tokens"])
                 decoded.extend(decoder.feed(chunk))
             decoded.extend(decoder.finish())
         finally:
@@ -364,6 +381,16 @@ class SnapshotForkRunner:
                 await close()
         if not decoded:
             raise ValueError("self-speculation fork produced no complete tool call")
+        cache_evidence = verify_fork_cache(
+            self.engine,
+            self.cache_policy,
+            reused_tokens=cache_read_tokens,
+            prompt_tokens=(
+                context_budget.prompt_tokens
+                if context_budget is not None
+                else reported_prompt_tokens
+            ),
+        )
 
         boundary_text = str(
             options.get("draft_boundary") or continuation.boundary
@@ -438,6 +465,7 @@ class SnapshotForkRunner:
                     "output_chunks": output_chunks,
                     "decoded_tokens": decoded_tokens,
                     "logprobs": logprob_observation,
+                    "cache": cache_evidence.to_mapping(),
                     "continuation": {
                         "tool_format": continuation.tool_format,
                         "tool_prefix": continuation.decoder_prefix,

@@ -16,6 +16,7 @@ from self_speculation import (
     DraftBundle,
     DraftReceipt,
     EngineCapabilities,
+    EngineCacheReuseError,
     InferenceRequest,
     SelfSpeculationControlPlane,
     SnapshotForkRunner,
@@ -173,6 +174,7 @@ class ForkEngine:
         prompt=True,
         logprobs=True,
         prefix_cache=True,
+        cache_read_reporting=True,
         max_context_tokens=32,
     )
 
@@ -189,6 +191,10 @@ class ForkEngine:
         yield StreamChunk(
             text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>',
             token_ids=(1, 2),
+            usage={
+                "prompt_tokens": len(request.prompt or ""),
+                "cache_read_tokens": 16,
+            },
             logprobs=(
                 TokenLogprob(token="write", logprob=-0.2),
                 TokenLogprob(token="call", logprob=-0.4),
@@ -202,7 +208,8 @@ class AgreeingForkEngine(ForkEngine):
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"read","arguments":{"path":"in.txt"}}</tool_call>'
+            text='{"name":"read","arguments":{"path":"in.txt"}}</tool_call>',
+            usage={"cache_read_tokens": 16},
         )
 
 
@@ -212,7 +219,8 @@ class ParallelForkEngine(ForkEngine):
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"read","arguments":{"path":"a.txt"}}</tool_call>'
+            text='{"name":"read","arguments":{"path":"a.txt"}}</tool_call>',
+            usage={"cache_read_tokens": 16},
         )
         yield StreamChunk(
             text=(
@@ -236,7 +244,19 @@ class GatedForkEngine(ForkEngine):
         self.started.set()
         await self.release.wait()
         yield StreamChunk(
-            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>'
+            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>',
+            usage={"cache_read_tokens": 16},
+        )
+
+
+class CacheMissForkEngine(ForkEngine):
+    async def stream(
+        self, request: InferenceRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
+        yield StreamChunk(
+            text='{"name":"read","arguments":{}}</tool_call>',
+            usage={"prompt_tokens": len(request.prompt or "")},
         )
 
 
@@ -321,6 +341,18 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
                 "max_output_tokens": 7,
             },
         )
+        self.assertEqual(
+            observed["fork"]["cache"],
+            {
+                "policy": "required",
+                "configured": True,
+                "reported": True,
+                "verified": True,
+                "reused_tokens": 16,
+                "prompt_tokens": 25,
+                "hit_rate": 16 / 25,
+            },
+        )
         self.assertGreaterEqual(observed["fork"]["total_ms"], 0)
         self.assertEqual(
             engine.requests[0].prompt,
@@ -334,6 +366,12 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
 
         await plane.clear("actor-request")
         self.assertEqual(feedback.cleared, ["actor-request"])
+
+    async def test_rejects_a_declared_cache_that_did_not_hit(self) -> None:
+        runner = SnapshotForkRunner(CacheMissForkEngine(), encode)
+
+        with self.assertRaisesRegex(EngineCacheReuseError, "no KV-cache reuse"):
+            await runner.run(fork_payload())
 
     async def test_preserves_a_parallel_fork_as_one_complete_candidate(self) -> None:
         feedback = RecordingBundleFeedback()
@@ -380,6 +418,7 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
             prompt=True,
             logprobs=True,
             prefix_cache=True,
+            cache_read_reporting=True,
             max_context_tokens=64,
         )
         payload = fork_payload()

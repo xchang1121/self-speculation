@@ -127,7 +127,18 @@ def _chat_logprobs(value: Any) -> tuple[TokenLogprob, ...]:
 def _usage(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping):
         return {}
-    return {str(key): item for key, item in value.items() if isinstance(item, int)}
+    result = {
+        str(key): item for key, item in value.items() if isinstance(item, int)
+    }
+    details = value.get("prompt_tokens_details") or value.get(
+        "input_tokens_details"
+    )
+    if isinstance(details, Mapping) and isinstance(details.get("cached_tokens"), int):
+        result["cache_read_tokens"] = int(details["cached_tokens"])
+    for key in ("cached_tokens", "cache_read_input_tokens"):
+        if isinstance(value.get(key), int):
+            result["cache_read_tokens"] = int(value[key])
+    return result
 
 
 class OpenAICompatibleEngine:
@@ -144,6 +155,7 @@ class OpenAICompatibleEngine:
         name: str = "openai-compatible",
         choice_index: int = 0,
         prefix_cache: bool | None = None,
+        cache_read_reporting: bool = False,
         request_id_field: str | None = None,
         max_context_tokens: int | None = None,
         prompt_token_counter: PromptTokenCounter | None = None,
@@ -168,6 +180,7 @@ class OpenAICompatibleEngine:
             token_ids=True,
             logprobs=True,
             prefix_cache=prefix_cache,
+            cache_read_reporting=cache_read_reporting,
             max_context_tokens=max_context_tokens,
         )
         self._client = client or module.AsyncClient()
@@ -196,6 +209,14 @@ class OpenAICompatibleEngine:
     def _payload(self, request: InferenceRequest) -> tuple[str, dict[str, Any]]:
         body = dict(request.extra)
         body["stream"] = True
+        if self.capabilities.cache_read_reporting:
+            stream_options = body.setdefault("stream_options", {})
+            if not isinstance(stream_options, Mapping):
+                raise TypeError("extra['stream_options'] must be a mapping")
+            body["stream_options"] = {
+                **dict(stream_options),
+                "include_usage": True,
+            }
         if self.request_id_field is not None:
             body.setdefault(self.request_id_field, request.request_id)
         if request.model is not None:
@@ -306,6 +327,7 @@ class VLLMEngine(OpenAICompatibleEngine):
     def __init__(self, base_url: str, **kwargs: Any) -> None:
         kwargs.setdefault("name", "vllm")
         kwargs.setdefault("request_id_field", "request_id")
+        kwargs.setdefault("cache_read_reporting", True)
         super().__init__(base_url, **kwargs)
 
 
@@ -313,6 +335,7 @@ class SGLangEngine(OpenAICompatibleEngine):
     def __init__(self, base_url: str, **kwargs: Any) -> None:
         kwargs.setdefault("name", "sglang")
         kwargs.setdefault("request_id_field", "rid")
+        kwargs.setdefault("cache_read_reporting", True)
         super().__init__(base_url, **kwargs)
 
 

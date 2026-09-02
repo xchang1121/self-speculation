@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 from self_speculation import (
     EngineCapabilities,
+    EngineCacheReuseError,
     EngineCapabilityError,
     EngineContextLimitError,
     InferenceEngine,
@@ -14,6 +15,8 @@ from self_speculation import (
     ToolCallDelta,
     validate_request,
     fit_request_to_context,
+    validate_fork_cache,
+    verify_fork_cache,
 )
 
 
@@ -84,6 +87,32 @@ class EngineProtocolTest(unittest.TestCase):
     def test_rejects_an_invalid_declared_context_window(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_context_tokens"):
             EngineCapabilities(max_context_tokens=0)
+
+    def test_required_forks_need_an_observed_cache_hit(self) -> None:
+        engine = FakeEngine()
+        with self.assertRaisesRegex(EngineCacheReuseError, "prefix caching"):
+            validate_fork_cache(engine, "required")
+
+        engine.capabilities = EngineCapabilities(
+            prefix_cache=True,
+            cache_read_reporting=True,
+        )
+        validate_fork_cache(engine, "required")
+        with self.assertRaisesRegex(EngineCacheReuseError, "no KV-cache reuse"):
+            verify_fork_cache(
+                engine,
+                "required",
+                reused_tokens=0,
+                prompt_tokens=10,
+            )
+        evidence = verify_fork_cache(
+            engine,
+            "required",
+            reused_tokens=8,
+            prompt_tokens=10,
+        )
+        self.assertTrue(evidence.verified)
+        self.assertEqual(evidence.to_mapping()["hit_rate"], 0.8)
 
 
 class RequestContextBudgetTest(unittest.IsolatedAsyncioTestCase):
