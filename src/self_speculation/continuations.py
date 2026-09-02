@@ -83,7 +83,9 @@ class ContinuationPlanner:
         forced_prefix: str | None = None,
     ) -> ForkContinuation:
         syntax = tool_call_syntax(tool_format)
-        tool_prefix = forced_prefix if forced_prefix is not None else syntax.boundary
+        tool_prefix = (
+            forced_prefix if forced_prefix is not None else syntax.probe_prefix
+        )
         if not tool_prefix:
             raise ContinuationFormatError("forced tool-call prefix must not be empty")
         if not tool_prefix.startswith(syntax.boundary):

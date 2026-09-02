@@ -175,7 +175,7 @@ class ForkEngine:
         logprobs=True,
         prefix_cache=True,
         cache_read_reporting=True,
-        max_context_tokens=32,
+        max_context_tokens=64,
     )
 
     def __init__(self) -> None:
@@ -189,7 +189,7 @@ class ForkEngine:
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>',
+            text='write","arguments":{"path":"out.txt"}}</tool_call>',
             token_ids=(1, 2),
             usage={
                 "prompt_tokens": len(request.prompt or ""),
@@ -208,7 +208,7 @@ class AgreeingForkEngine(ForkEngine):
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"read","arguments":{"path":"in.txt"}}</tool_call>',
+            text='read","arguments":{"path":"in.txt"}}</tool_call>',
             usage={"cache_read_tokens": 16},
         )
 
@@ -219,7 +219,7 @@ class ParallelForkEngine(ForkEngine):
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"read","arguments":{"path":"a.txt"}}</tool_call>',
+            text='read","arguments":{"path":"a.txt"}}</tool_call>',
             usage={"cache_read_tokens": 16},
         )
         yield StreamChunk(
@@ -244,7 +244,7 @@ class GatedForkEngine(ForkEngine):
         self.started.set()
         await self.release.wait()
         yield StreamChunk(
-            text='{"name":"write","arguments":{"path":"out.txt"}}</tool_call>',
+            text='write","arguments":{"path":"out.txt"}}</tool_call>',
             usage={"cache_read_tokens": 16},
         )
 
@@ -255,7 +255,7 @@ class CacheMissForkEngine(ForkEngine):
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamChunk(
-            text='{"name":"read","arguments":{}}</tool_call>',
+            text='read","arguments":{}}</tool_call>',
             usage={"prompt_tokens": len(request.prompt or "")},
         )
 
@@ -336,9 +336,9 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             observed["fork"]["context_budget"],
             {
-                "prompt_tokens": 25,
-                "max_context_tokens": 32,
-                "max_output_tokens": 7,
+                "prompt_tokens": 35,
+                "max_context_tokens": 64,
+                "max_output_tokens": 29,
             },
         )
         self.assertEqual(
@@ -349,20 +349,28 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
                 "reported": True,
                 "verified": True,
                 "reused_tokens": 16,
-                "prompt_tokens": 25,
-                "hit_rate": 16 / 25,
+                "prompt_tokens": 35,
+                "hit_rate": 16 / 35,
+            },
+        )
+        self.assertEqual(
+            observed["fork"]["probe"],
+            {
+                "attempt": 2,
+                "snapshot_tokens": 4,
+                "snapshot_output_chunks": 1,
             },
         )
         self.assertGreaterEqual(observed["fork"]["total_ms"], 0)
         self.assertEqual(
             engine.requests[0].prompt,
-            "PROMPTobserved<tool_call>",
+            'PROMPTobserved<tool_call>\n{"name":"',
         )
         self.assertEqual(
             engine.requests[0].extra,
             {"logprobs": True, "top_logprobs": 1},
         )
-        self.assertEqual(engine.requests[0].max_tokens, 7)
+        self.assertEqual(engine.requests[0].max_tokens, 29)
 
         await plane.clear("actor-request")
         self.assertEqual(feedback.cleared, ["actor-request"])
@@ -434,7 +442,7 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             engine.requests[0].prompt,
-            "PROMPT<think>\nreason\n</think>\n\n<tool_call>",
+            'PROMPT<think>\nreason\n</think>\n\n<tool_call>\n{"name":"',
         )
 
     async def test_deduplicates_self_agreement_by_complete_draft_content(self) -> None:
@@ -606,9 +614,10 @@ def fork_payload():
             "content": "observed",
             "chunk_count": 1,
             "output_chunk_count": 1,
+            "token_count": 4,
+            "attempt": 2,
         },
         "options": {
-            "forced_prefix": "<tool_call>",
             "decoder": "tagged_json",
             "draft_format": "tagged_json",
             "draft_boundary": "<tool_call>",

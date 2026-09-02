@@ -88,6 +88,29 @@ class CallableForkBuilderTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ContinuationPlannerTest(unittest.TestCase):
+    def test_uses_each_formats_name_aligned_probe_prefix(self) -> None:
+        prefixes = {
+            "tagged_json": '<tool_call>\n{"name":"',
+            "qwen_xml": "<tool_call>\n<function=",
+            "deepseek_dsml": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="',
+            "deepseek_v3": (
+                "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>"
+                "function<｜tool▁sep｜>"
+            ),
+            "mistral_json": "[TOOL_CALLS]",
+            "llama_json": "<|python_tag|>",
+            "pythonic": "<|python_tag|>",
+        }
+
+        for format_name, prefix in prefixes.items():
+            with self.subTest(format_name=format_name):
+                plan = ContinuationPlanner().plan(
+                    "prompt",
+                    StreamSnapshot(generated_text="text", content="text"),
+                    tool_format=format_name,
+                )
+                self.assertEqual(plan.forced_suffix, prefix)
+
     def test_closes_the_envelope_that_is_actually_open(self) -> None:
         plan = ContinuationPlanner().plan(
             "<|assistant|><analysis>\n",
@@ -98,7 +121,7 @@ class ContinuationPlannerTest(unittest.TestCase):
         self.assertEqual(plan.observed_text, "inspect")
         self.assertEqual(
             plan.forced_suffix,
-            "\n</analysis>\n\n<tool_call>",
+            '\n</analysis>\n\n<tool_call>\n{"name":"',
         )
         self.assertEqual(plan.reasoning_format, "analysis_xml")
 
@@ -117,7 +140,7 @@ class ContinuationPlannerTest(unittest.TestCase):
             plan.observed_text,
             "reason\n</think>\n\nanswer",
         )
-        self.assertEqual(plan.forced_suffix, "<tool_call>")
+        self.assertEqual(plan.forced_suffix, "<tool_call>\n<function=")
         self.assertTrue(plan.reconstructed_transition)
 
     def test_rejects_opaque_reasoning_without_a_text_envelope(self) -> None:

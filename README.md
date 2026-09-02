@@ -235,6 +235,12 @@ two fields separately. Signed or otherwise structured reasoning without a
 matching text envelope is rejected; that path requires an engine-native fork
 which preserves the provider state instead of fabricating text.
 
+The selected tool format also supplies a name-aligned probe prefix. JSON/XML
+schema text is forced through the character immediately before the tool name,
+so D2 confidence is measured from generated tool-name tokens rather than from
+framing such as a JSON `name` key. Probe receipts retain the attempt number and
+the exact Actor snapshot size used by an external retry scheduler.
+
 `SnapshotForkRunner` also defaults to `cache_policy="required"`. A declaration
 that prefix caching is enabled is not enough: the adapter must expose the
 fork's per-request cache-read token count and that count must be positive.

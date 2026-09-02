@@ -297,6 +297,11 @@ class SnapshotForkRunner:
             ),
             token_count=int(snapshot_payload.get("token_count") or 0),
         )
+        probe_attempt = _positive_integer(
+            snapshot_payload.get("attempt"),
+            field="snapshot.attempt",
+            fallback=1,
+        )
         format_name = str(
             options.get("draft_format") or self.default_format
         ).strip()
@@ -466,6 +471,11 @@ class SnapshotForkRunner:
                     "decoded_tokens": decoded_tokens,
                     "logprobs": logprob_observation,
                     "cache": cache_evidence.to_mapping(),
+                    "probe": {
+                        "attempt": probe_attempt,
+                        "snapshot_tokens": snapshot.token_count,
+                        "snapshot_output_chunks": snapshot.output_chunk_count,
+                    },
                     "continuation": {
                         "tool_format": continuation.tool_format,
                         "tool_prefix": continuation.decoder_prefix,

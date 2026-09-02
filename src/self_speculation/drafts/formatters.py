@@ -15,21 +15,30 @@ class ToolCallSyntax:
     """Text framing shared by probe continuation and D3 serialization."""
 
     boundary: str
+    probe_prefix: str
     close: str | None = None
 
 
 _TOOL_CALL_SYNTAXES = {
-    "tagged_json": ToolCallSyntax("<tool_call>", "</tool_call>"),
-    "qwen_xml": ToolCallSyntax("<tool_call>", "</tool_call>"),
+    "tagged_json": ToolCallSyntax(
+        "<tool_call>", '<tool_call>\n{"name":"', "</tool_call>"
+    ),
+    "qwen_xml": ToolCallSyntax(
+        "<tool_call>", "<tool_call>\n<function=", "</tool_call>"
+    ),
     "deepseek_dsml": ToolCallSyntax(
-        "<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>"
+        "<｜DSML｜tool_calls>",
+        '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="',
+        "</｜DSML｜tool_calls>",
     ),
     "deepseek_v3": ToolCallSyntax(
-        "<｜tool▁calls▁begin｜>", "<｜tool▁calls▁end｜>"
+        "<｜tool▁calls▁begin｜>",
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>",
+        "<｜tool▁calls▁end｜>",
     ),
-    "mistral_json": ToolCallSyntax("[TOOL_CALLS]"),
-    "llama_json": ToolCallSyntax("<|python_tag|>"),
-    "pythonic": ToolCallSyntax("<|python_tag|>"),
+    "mistral_json": ToolCallSyntax("[TOOL_CALLS]", "[TOOL_CALLS]"),
+    "llama_json": ToolCallSyntax("<|python_tag|>", "<|python_tag|>"),
+    "pythonic": ToolCallSyntax("<|python_tag|>", "<|python_tag|>"),
 }
 
 
