@@ -115,6 +115,7 @@ class PrefixForkBuilder:
             prompt=base + observed + self.forced_prefix,
             model=main_request.model,
             request_id=main_request.request_id + self.request_id_suffix,
+            parent_request_id=main_request.request_id,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             stop=self.stop,
@@ -137,4 +138,8 @@ class CallableForkBuilder:
         request = await _resolve(self.factory(main_request, snapshot))
         if not isinstance(request, InferenceRequest):
             raise ForkBuildError("fork request factory must return InferenceRequest")
-        return request
+        return (
+            request
+            if request.parent_request_id is not None
+            else request.with_changes(parent_request_id=main_request.request_id)
+        )

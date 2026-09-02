@@ -10,6 +10,7 @@ from self_speculation import (
     DraftRequest,
     InferenceRequest,
     TransformersEngine,
+    TransformersPrefixCache,
 )
 
 
@@ -97,6 +98,80 @@ class TransformersEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks[-1].finish_reason, "length")
         self.assertEqual(chunks[-1].usage["prompt_tokens"], 3)
         self.assertEqual(chunks[-1].usage["completion_tokens"], 3)
+
+    async def test_fork_reuses_an_exact_request_owned_prefix(self) -> None:
+        import torch
+
+        class TinyTokenizer:
+            def encode(self, text, *, add_special_tokens=True):
+                del text
+                return [1, 4, 5] if add_special_tokens else [4, 5]
+
+            def __call__(self, text, *, return_tensors=None, add_special_tokens=True):
+                del text, return_tensors
+                ids = self.encode("", add_special_tokens=add_special_tokens)
+                tensor = torch.tensor([ids], dtype=torch.long)
+                return {
+                    "input_ids": tensor,
+                    "attention_mask": torch.ones_like(tensor),
+                }
+
+            def decode(self, token_ids, **kwargs):
+                del kwargs
+                return "".join(f"t{int(token_id)} " for token_id in token_ids)
+
+        cache = TransformersPrefixCache("tiny-test")
+        actor_engine = TransformersEngine(
+            self.model,
+            TinyTokenizer(),
+            prefix_cache=cache,
+            model_identity="tiny-test",
+        )
+        fork_engine = TransformersEngine(
+            self.model,
+            TinyTokenizer(),
+            prefix_cache=cache,
+            model_identity="tiny-test",
+        )
+        _ = [
+            chunk
+            async for chunk in actor_engine.stream(
+                InferenceRequest(
+                    prompt="actor",
+                    request_id="actor-cache",
+                    max_tokens=1,
+                )
+            )
+        ]
+
+        chunks = [
+            chunk
+            async for chunk in fork_engine.stream(
+                InferenceRequest(
+                    prompt="actor plus forced suffix",
+                    request_id="actor-cache:fork",
+                    parent_request_id="actor-cache",
+                    max_tokens=2,
+                )
+            )
+        ]
+
+        self.assertEqual(len(cache), 1)
+        self.assertEqual(chunks[-1].usage["prompt_tokens"], 3)
+        self.assertEqual(chunks[-1].usage["cache_read_tokens"], 2)
+        await fork_engine.clear("actor-cache")
+        self.assertEqual(len(cache), 0)
+
+    def test_shared_prefix_cache_requires_an_explicit_model_identity(self) -> None:
+        class Tokenizer:
+            pass
+
+        with self.assertRaisesRegex(ValueError, "model_identity"):
+            TransformersEngine(
+                self.model,
+                Tokenizer(),
+                prefix_cache=TransformersPrefixCache("model-a"),
+            )
 
     async def test_renders_chat_and_accepts_async_renderer(self) -> None:
         class Tokenizer:

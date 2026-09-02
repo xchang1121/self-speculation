@@ -34,6 +34,7 @@ class PrefixForkBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fork.prompt, "PROMPTthinking</think><tool_call>")
         self.assertEqual(fork.model, "model-a")
         self.assertEqual(fork.request_id, "turn-1:fork")
+        self.assertEqual(fork.parent_request_id, "turn-1")
         self.assertEqual(fork.stop, ("</tool_call>",))
         self.assertEqual(fork.extra, {"logprobs": 5})
 
@@ -78,6 +79,7 @@ class CallableForkBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fork.input_mode, "chat")
         self.assertEqual(fork.request_id, "r:custom")
+        self.assertEqual(fork.parent_request_id, "r")
 
     async def test_rejects_wrong_factory_result(self) -> None:
         builder = CallableForkBuilder(lambda request, snapshot: "not a request")

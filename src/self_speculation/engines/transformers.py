@@ -17,6 +17,7 @@ from ..drafts import (
     DraftVerificationOutcome,
 )
 from ..models import EngineCapabilities, InferenceRequest, StreamChunk
+from .transformers_cache import TransformersPrefixCache
 
 
 TransformersPromptRenderer = Callable[
@@ -85,12 +86,14 @@ class TransformersBoundaryCandidateGenerator:
         request_id: str,
         *,
         max_tokens: int,
+        prefix_token_ids: tuple[int, ...] = (),
     ) -> None:
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
         self.store = store
         self.request_id = request_id
         self.max_tokens = max_tokens
+        self.prefix_token_ids = prefix_token_ids
         self.proposal_count = 0
         self.proposed_tokens = 0
         self.accepted_tokens = 0
@@ -102,10 +105,13 @@ class TransformersBoundaryCandidateGenerator:
             raise ValueError(
                 "Transformers boundary drafts require batch size 1 token IDs"
             )
-        sequence_length = int(input_ids.shape[1])
+        sequence = self.prefix_token_ids + tuple(
+            int(item) for item in input_ids[0].tolist()
+        )
+        sequence_length = len(sequence)
         proposal = self.store.offer(
             self.request_id,
-            input_ids[0].tolist(),
+            sequence,
             sequence_length=sequence_length,
             max_tokens=self.max_tokens,
         )
@@ -276,6 +282,27 @@ def _to_device(inputs: Any, device: Any) -> Any:
     }
 
 
+def _slice_inputs(
+    inputs: Mapping[str, Any],
+    start: int = 0,
+    end: int | None = None,
+    *,
+    full_attention_mask: bool = False,
+) -> dict[str, Any]:
+    length = _shape_length(inputs["input_ids"])
+    result: dict[str, Any] = {}
+    for key, value in inputs.items():
+        shape = getattr(value, "shape", ())
+        if shape and int(shape[-1]) == length:
+            if key == "attention_mask" and full_attention_mask:
+                result[key] = value
+            else:
+                result[key] = value[..., start:end]
+        else:
+            result[key] = value
+    return result
+
+
 class TransformersEngine:
     """Stream an in-process Transformers ``generate`` call.
 
@@ -297,6 +324,8 @@ class TransformersEngine:
         draft_store: BoundaryDraftStore | None = None,
         max_draft_tokens: int = 28,
         draft_request_predicate: TransformersDraftRequestPredicate | None = None,
+        prefix_cache: TransformersPrefixCache | None = None,
+        model_identity: str | None = None,
         max_context_tokens: int | None = None,
         name: str = "transformers",
     ) -> None:
@@ -306,6 +335,10 @@ class TransformersEngine:
             raise ValueError("tokenizer is required")
         if max_draft_tokens <= 0:
             raise ValueError("max_draft_tokens must be positive")
+        if prefix_cache is not None and model_identity != prefix_cache.model_identity:
+            raise ValueError(
+                "model_identity must match the shared TransformersPrefixCache"
+            )
         self.model = model
         self.tokenizer = tokenizer
         self.prompt_renderer = prompt_renderer
@@ -316,8 +349,9 @@ class TransformersEngine:
         self.draft_store = draft_store
         self.max_draft_tokens = max_draft_tokens
         self.draft_request_predicate = draft_request_predicate or (
-            lambda request: not request.request_id.endswith(":fork")
+            lambda request: request.parent_request_id is None
         )
+        self.prefix_cache = prefix_cache
         self.name = name
         model_config = getattr(model, "config", None)
         if max_context_tokens is None and model_config is not None:
@@ -334,7 +368,8 @@ class TransformersEngine:
             prompt=True,
             chat=True,
             token_ids=True,
-            prefix_cache=False,
+            prefix_cache=prefix_cache is not None,
+            cache_read_reporting=prefix_cache is not None,
             draft_feedback=draft_store is not None,
             max_context_tokens=max_context_tokens,
         )
@@ -410,6 +445,8 @@ class TransformersEngine:
     async def clear(
         self, request_id: str
     ) -> DraftVerificationOutcome | None:
+        if self.prefix_cache is not None:
+            self.prefix_cache.clear(request_id)
         if self.draft_store is None:
             return None
         return self.draft_store.take_outcome(request_id)
@@ -446,12 +483,63 @@ class TransformersEngine:
             raise TypeError("tokenizer must return a mapping or BatchEncoding")
         return _to_device(inputs, getattr(self.model, "device", None))
 
+    def _prefill(self, inputs: Mapping[str, Any]) -> Any:
+        torch = _torch()
+        with torch.no_grad():
+            output = self.model(**dict(inputs), use_cache=True, return_dict=True)
+        past_key_values = getattr(output, "past_key_values", None)
+        if past_key_values is None:
+            raise ValueError("model forward did not return past_key_values")
+        return past_key_values
+
+    async def _cached_inputs(
+        self,
+        request: InferenceRequest,
+        inputs: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], int, tuple[int, ...]]:
+        token_ids = _flatten_token_ids(inputs["input_ids"])
+        if self.prefix_cache is None:
+            return dict(inputs), 0, ()
+
+        owner = request.parent_request_id or request.request_id
+        state = self.prefix_cache.fork(owner, token_ids)
+        if state is None and request.parent_request_id is None and len(token_ids) > 1:
+            prefix_length = len(token_ids) - 1
+            past = await asyncio.to_thread(
+                self._prefill,
+                _slice_inputs(inputs, end=prefix_length),
+            )
+            self.prefix_cache.put(
+                request.request_id,
+                token_ids[:prefix_length],
+                past,
+            )
+            state = self.prefix_cache.fork(request.request_id, token_ids)
+        if state is None:
+            return dict(inputs), 0, ()
+
+        reused = len(state.token_ids)
+        remaining = _slice_inputs(
+            inputs,
+            start=reused,
+            full_attention_mask=True,
+        )
+        if _shape_length(remaining["input_ids"]) == 0:
+            raise ValueError("cached prefix must leave at least one input token")
+        remaining["past_key_values"] = state.past_key_values
+        return remaining, reused, state.token_ids
+
     async def stream(self, request: InferenceRequest) -> AsyncIterator[StreamChunk]:
         StoppingCriteria, StoppingCriteriaList, _ = _transformers()
         prompt = await self.render_prompt(request)
-        inputs = await self._inputs(prompt)
+        full_inputs = await self._inputs(prompt)
+        prompt_tokens = _shape_length(full_inputs["input_ids"])
+        inputs, cache_read_tokens, cached_prefix_ids = await self._cached_inputs(
+            request,
+            full_inputs,
+        )
         input_ids = inputs["input_ids"]
-        prompt_tokens = _shape_length(input_ids)
+        generation_input_tokens = _shape_length(input_ids)
         stop_event = threading.Event()
 
         class StopOnCancellation(StoppingCriteria):
@@ -476,6 +564,7 @@ class TransformersEngine:
                     self.draft_store,
                     request.request_id,
                     max_tokens=self.max_draft_tokens,
+                    prefix_token_ids=cached_prefix_ids,
                 )
             )
         supplied_criteria = options.pop("stopping_criteria", None)
@@ -536,7 +625,7 @@ class TransformersEngine:
             completed = True
             sequences = getattr(output, "sequences", output)
             total_tokens = _shape_length(sequences)
-            completion_tokens = max(0, total_tokens - prompt_tokens)
+            completion_tokens = max(0, total_tokens - generation_input_tokens)
             finish_reason = (
                 "length"
                 if request.max_tokens is not None
@@ -548,7 +637,8 @@ class TransformersEngine:
                 usage={
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "cache_read_tokens": cache_read_tokens,
                 },
                 raw=output,
             )

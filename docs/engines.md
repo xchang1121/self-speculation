@@ -80,16 +80,23 @@ python -m pip install -e ".[transformers]"
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from self_speculation import BoundaryDraftStore, TransformersEngine
+from self_speculation import (
+    BoundaryDraftStore,
+    TransformersEngine,
+    TransformersPrefixCache,
+)
 
 model_id = "YOUR_MODEL"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto").eval()
 store = BoundaryDraftStore(max_draft_tokens=28)
+prefix_cache = TransformersPrefixCache(model_id)
 engine = TransformersEngine(
     model,
     tokenizer,
     draft_store=store,
+    prefix_cache=prefix_cache,
+    model_identity=model_id,
     max_draft_tokens=28,
 )
 ```
@@ -100,10 +107,18 @@ tokens through Transformers assisted decoding; the target model still scores
 and accepts or rejects each candidate. D3 currently requires batch size one,
 `num_beams=1`, and `use_cache=True`.
 
-Use a separate model/engine for `fork_engine` when true concurrent main and
-fork execution is required. The unit suite exercises a real tiny
-`GPT2LMHeadModel` on Transformers 5.15.1 and confirms identical output with
-fewer target forward calls for an accepted draft.
+The optional shared prefix cache splits the Actor prefill from generation and
+stores an immutable copy. A fork names its parent request explicitly and can
+only reuse a state owned by that request whose token IDs are an exact prefix;
+the mutable Transformers cache is copied before either branch continues. Pass
+the same cache and explicit model identity to a separate model/engine when
+true concurrent execution is required. The identity asserts that weights,
+architecture, tokenizer, device layout, and numeric type match. Unlike vLLM's
+paged copy-on-write cache, this portable fallback trades one KV copy for broad
+Transformers compatibility.
+
+The unit suite exercises a real tiny `GPT2LMHeadModel` on Transformers 5.x and
+checks both D3 output preservation and the measured parent-owned cache hit.
 
 ## llama-cpp-python
 

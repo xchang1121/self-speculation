@@ -36,6 +36,7 @@ from .transformers import (
     TransformersEngine,
     TransformersPromptRenderer,
 )
+from .transformers_cache import TransformersPrefixCache, TransformersPrefixState
 from .vllm_native import (
     NativePromptRenderer,
     NativePromptTokenCounter,
@@ -73,6 +74,8 @@ __all__ = [
     "TransformersBoundaryCandidateGenerator",
     "TransformersDraftRequestPredicate",
     "TransformersEngine",
+    "TransformersPrefixCache",
+    "TransformersPrefixState",
     "TransformersPromptRenderer",
     "VLLMEngine",
     "VLLMNativeEngine",

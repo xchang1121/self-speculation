@@ -53,6 +53,8 @@ class InferenceRequestTest(unittest.TestCase):
             InferenceRequest(prompt="x", max_tokens=0)
         with self.assertRaisesRegex(ValueError, "stop strings"):
             InferenceRequest(prompt="x", stop=("",))
+        with self.assertRaisesRegex(ValueError, "parent_request_id"):
+            InferenceRequest(prompt="x", parent_request_id="")
 
 
 class StreamModelTest(unittest.TestCase):

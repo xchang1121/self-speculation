@@ -24,6 +24,7 @@ class InferenceRequest:
     model: str | None = None
     tools: tuple[Mapping[str, Any], ...] = ()
     request_id: str = field(default_factory=lambda: uuid4().hex)
+    parent_request_id: str | None = None
     max_tokens: int | None = None
     temperature: float | None = 0.0
     stop: tuple[str, ...] = ()
@@ -40,6 +41,11 @@ class InferenceRequest:
             raise ValueError("exactly one of prompt or messages must be provided")
         if not self.request_id.strip():
             raise ValueError("request_id must not be empty")
+        if (
+            self.parent_request_id is not None
+            and not self.parent_request_id.strip()
+        ):
+            raise ValueError("parent_request_id must not be empty")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
         if any(not value for value in self.stop):
