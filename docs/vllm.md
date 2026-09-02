@@ -137,8 +137,8 @@ from self_speculation import (
 )
 
 MODEL = "YOUR_MODEL"
+MAX_CONTEXT = 131072  # match the serving engine's configured max-model-len
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
-fork_engine = VLLMEngine("http://127.0.0.1:8000/v1", prefix_cache=True)
 feedback = VLLMHTTPDraftFeedback("http://127.0.0.1:8000")
 
 
@@ -153,6 +153,19 @@ def render(request) -> str:
         tokenize=False,
         add_generation_prompt=True,
     )
+
+
+def count_prompt(request) -> int:
+    # This must mirror the serving endpoint's raw-prompt tokenization exactly.
+    return len(tokenizer.encode(request.prompt, add_special_tokens=True))
+
+
+fork_engine = VLLMEngine(
+    "http://127.0.0.1:8000/v1",
+    prefix_cache=True,
+    max_context_tokens=MAX_CONTEXT,
+    prompt_token_counter=count_prompt,
+)
 
 
 control_plane = SelfSpeculationControlPlane(
@@ -174,6 +187,11 @@ that URL, and select its `sidecar` fork transport. The sidecar sends the merged
 bundle to vLLM through `/draft-bundles`; vLLM remains the only target verifier.
 Use an application lifespan hook to close `fork_engine` and `feedback` during
 shutdown.
+
+When a context window is declared, the runner counts the fully rendered fork
+prompt before dispatch. It preserves the exact Actor prefix and only reduces
+fork output tokens; a full prompt is rejected locally instead of provoking
+provider-side truncation or compression.
 
 If only external concrete actions are needed, point the agent directly at the
 vLLM server and disable its sidecar fork. A `provider` transport is a separate

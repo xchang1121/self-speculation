@@ -6,12 +6,14 @@ from collections.abc import AsyncIterator
 from self_speculation import (
     EngineCapabilities,
     EngineCapabilityError,
+    EngineContextLimitError,
     InferenceEngine,
     InferenceRequest,
     StreamChunk,
     StreamSnapshot,
     ToolCallDelta,
     validate_request,
+    fit_request_to_context,
 )
 
 
@@ -78,6 +80,38 @@ class EngineProtocolTest(unittest.TestCase):
         validate_request(engine, InferenceRequest(prompt="ok"))
         with self.assertRaises(EngineCapabilityError):
             validate_request(engine, InferenceRequest(messages=({"role": "user"},)))
+
+    def test_rejects_an_invalid_declared_context_window(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_context_tokens"):
+            EngineCapabilities(max_context_tokens=0)
+
+
+class RequestContextBudgetTest(unittest.IsolatedAsyncioTestCase):
+    async def test_clamps_output_without_changing_the_prompt(self) -> None:
+        class BoundedEngine(FakeEngine):
+            capabilities = EngineCapabilities(max_context_tokens=8)
+
+            async def prompt_token_count(self, request: InferenceRequest) -> int:
+                return len(request.prompt or "")
+
+        request = InferenceRequest(prompt="123456", max_tokens=9)
+        bounded, budget = await fit_request_to_context(BoundedEngine(), request)
+
+        self.assertEqual(bounded.prompt, request.prompt)
+        self.assertEqual(bounded.max_tokens, 2)
+        self.assertEqual(budget.max_output_tokens if budget else None, 2)
+
+    async def test_rejects_a_full_prompt_before_engine_dispatch(self) -> None:
+        class FullEngine(FakeEngine):
+            capabilities = EngineCapabilities(max_context_tokens=4)
+
+            async def prompt_token_count(self, request: InferenceRequest) -> int:
+                return len(request.prompt or "")
+
+        with self.assertRaises(EngineContextLimitError):
+            await fit_request_to_context(
+                FullEngine(), InferenceRequest(prompt="full", max_tokens=1)
+            )
 
 
 if __name__ == "__main__":

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncIterator, Mapping
-from typing import Any, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from ..models import (
     EngineCapabilities,
@@ -16,6 +17,9 @@ from ..models import (
 
 if TYPE_CHECKING:
     import httpx
+
+
+PromptTokenCounter = Callable[[InferenceRequest], int | Awaitable[int]]
 
 
 class OpenAIStreamError(RuntimeError):
@@ -141,6 +145,8 @@ class OpenAICompatibleEngine:
         choice_index: int = 0,
         prefix_cache: bool | None = None,
         request_id_field: str | None = None,
+        max_context_tokens: int | None = None,
+        prompt_token_counter: PromptTokenCounter | None = None,
     ) -> None:
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
@@ -154,6 +160,7 @@ class OpenAICompatibleEngine:
         self.name = name
         self.choice_index = choice_index
         self.request_id_field = request_id_field
+        self.prompt_token_counter = prompt_token_counter
         self.capabilities = EngineCapabilities(
             prompt=True,
             chat=True,
@@ -161,9 +168,16 @@ class OpenAICompatibleEngine:
             token_ids=True,
             logprobs=True,
             prefix_cache=prefix_cache,
+            max_context_tokens=max_context_tokens,
         )
         self._client = client or module.AsyncClient()
         self._owns_client = client is None
+
+    async def prompt_token_count(self, request: InferenceRequest) -> int:
+        if self.prompt_token_counter is None:
+            raise ValueError("OpenAI-compatible prompt counting requires prompt_token_counter")
+        value = self.prompt_token_counter(request)
+        return int(await value if inspect.isawaitable(value) else value)
 
     @property
     def completions_url(self) -> str:

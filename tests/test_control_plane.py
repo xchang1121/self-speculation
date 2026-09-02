@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import unittest
 from collections.abc import AsyncIterator
 
@@ -168,10 +169,18 @@ class GatedBundleFeedback(RecordingBundleFeedback):
 
 class ForkEngine:
     name = "fork-engine"
-    capabilities = EngineCapabilities(prompt=True, logprobs=True, prefix_cache=True)
+    capabilities = EngineCapabilities(
+        prompt=True,
+        logprobs=True,
+        prefix_cache=True,
+        max_context_tokens=32,
+    )
 
     def __init__(self) -> None:
         self.requests: list[InferenceRequest] = []
+
+    async def prompt_token_count(self, request: InferenceRequest) -> int:
+        return len(request.prompt or "")
 
     async def stream(
         self, request: InferenceRequest
@@ -292,7 +301,25 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed["fork"]["decoded_tokens"], 2)
         self.assertEqual(
             observed["fork"]["logprobs"],
-            {"token_count": 2, "mean": -0.30000000000000004, "minimum": -0.4},
+            {
+                "token_count": 2,
+                "mean": -0.30000000000000004,
+                "minimum": -0.4,
+                "tool_name": {
+                    "token_count": 1,
+                    "matched_calls": 1,
+                    "minimum": -0.2,
+                    "minimum_probability": math.exp(-0.2),
+                },
+            },
+        )
+        self.assertEqual(
+            observed["fork"]["context_budget"],
+            {
+                "prompt_tokens": 25,
+                "max_context_tokens": 32,
+                "max_output_tokens": 7,
+            },
         )
         self.assertGreaterEqual(observed["fork"]["total_ms"], 0)
         self.assertEqual(
@@ -303,6 +330,7 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
             engine.requests[0].extra,
             {"logprobs": True, "top_logprobs": 1},
         )
+        self.assertEqual(engine.requests[0].max_tokens, 7)
 
         await plane.clear("actor-request")
         self.assertEqual(feedback.cleared, ["actor-request"])

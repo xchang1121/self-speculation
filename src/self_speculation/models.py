@@ -167,6 +167,11 @@ class EngineCapabilities:
     logprobs: bool = False
     prefix_cache: bool | None = None
     draft_feedback: bool = False
+    max_context_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_context_tokens is not None and self.max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be positive")
 
     def supports(self, request: InferenceRequest) -> bool:
         return self.prompt if request.input_mode == "prompt" else self.chat

@@ -24,9 +24,9 @@ from .drafts import (
     default_draft_boundary,
     format_tool_call_draft,
 )
-from .engines import InferenceEngine, validate_request
+from .engines import InferenceEngine, fit_request_to_context, validate_request
 from .forks import PrefixForkBuilder, PromptRenderer
-from .models import InferenceRequest, StreamSnapshot, ToolCall
+from .models import InferenceRequest, StreamSnapshot, TokenLogprob, ToolCall
 
 
 class ControlRequestClosedError(RuntimeError):
@@ -51,6 +51,44 @@ def _array(value: Any, *, field: str) -> tuple[Any, ...]:
     if not isinstance(value, list):
         raise ValueError(f"{field} must be an array")
     return tuple(value)
+
+
+def _tool_name_logprobs(
+    tokens: tuple[TokenLogprob, ...],
+    calls: tuple[ToolCall, ...],
+) -> dict[str, Any]:
+    """Measure only generated tokens overlapping decoded tool names."""
+
+    generated = "".join(token.token for token in tokens)
+    spans: list[tuple[int, int, float]] = []
+    offset = 0
+    for token in tokens:
+        end = offset + len(token.token)
+        if token.logprob is not None and math.isfinite(token.logprob):
+            spans.append((offset, end, token.logprob))
+        offset = end
+    selected: list[float] = []
+    cursor = 0
+    matched_calls = 0
+    for call in calls:
+        start = generated.find(call.name, cursor)
+        if start < 0:
+            continue
+        end = start + len(call.name)
+        values = [value for left, right, value in spans if left < end and right > start]
+        if values:
+            selected.extend(values)
+            matched_calls += 1
+        cursor = end
+    if not selected:
+        return {"token_count": 0, "matched_calls": 0}
+    minimum = min(selected)
+    return {
+        "token_count": len(selected),
+        "matched_calls": matched_calls,
+        "minimum": minimum,
+        "minimum_probability": math.exp(minimum),
+    }
 
 
 def _action_identity(
@@ -273,6 +311,9 @@ class SnapshotForkRunner:
             ),
         )
         fork_request = await builder.build(actor_request, snapshot)
+        fork_request, context_budget = await fit_request_to_context(
+            self.engine, fork_request
+        )
         validate_request(self.engine, fork_request)
         fork_built_at = time.perf_counter()
         decoder_name = str(options.get("decoder") or "auto")
@@ -282,18 +323,14 @@ class SnapshotForkRunner:
         first_chunk_ms: float | None = None
         output_chunks = 0
         decoded_tokens = 0
-        logprob_values: list[float] = []
+        logprob_tokens: list[TokenLogprob] = []
         try:
             async for chunk in iterator:
                 if first_chunk_ms is None:
                     first_chunk_ms = (time.perf_counter() - fork_built_at) * 1000
                 output_chunks += int(chunk.has_output)
                 decoded_tokens += max(len(chunk.token_ids), len(chunk.logprobs))
-                logprob_values.extend(
-                    value.logprob
-                    for value in chunk.logprobs
-                    if value.logprob is not None and math.isfinite(value.logprob)
-                )
+                logprob_tokens.extend(chunk.logprobs)
                 decoded.extend(decoder.feed(chunk))
             decoded.extend(decoder.finish())
         finally:
@@ -343,11 +380,17 @@ class SnapshotForkRunner:
             ).encode("utf-8")
         ).hexdigest()[:16]
         fork_completed_at = time.perf_counter()
+        logprob_values = [
+            token.logprob
+            for token in logprob_tokens
+            if token.logprob is not None and math.isfinite(token.logprob)
+        ]
         logprob_observation = (
             {
                 "token_count": len(logprob_values),
                 "mean": sum(logprob_values) / len(logprob_values),
                 "minimum": min(logprob_values),
+                "tool_name": _tool_name_logprobs(tuple(logprob_tokens), calls),
             }
             if logprob_values
             else {"token_count": 0}
@@ -368,6 +411,17 @@ class SnapshotForkRunner:
                     "output_chunks": output_chunks,
                     "decoded_tokens": decoded_tokens,
                     "logprobs": logprob_observation,
+                    **(
+                        {
+                            "context_budget": {
+                                "prompt_tokens": context_budget.prompt_tokens,
+                                "max_context_tokens": context_budget.max_context_tokens,
+                                "max_output_tokens": context_budget.max_output_tokens,
+                            }
+                        }
+                        if context_budget is not None
+                        else {}
+                    ),
                 },
             },
         )

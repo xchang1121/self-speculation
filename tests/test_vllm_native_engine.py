@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from self_speculation import InferenceRequest, VLLMNativeEngine
+from self_speculation import InferenceRequest, VLLMNativeEngine, fit_request_to_context
 
 
 def output(
@@ -46,6 +46,21 @@ class FakeVLLM:
 
 
 class VLLMNativeEngineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_counts_pre_tokenized_native_prompts_for_context_budgeting(self) -> None:
+        engine = VLLMNativeEngine(
+            FakeVLLM([]),
+            sampling_params_factory=lambda request: object(),
+            prompt_renderer=lambda request: {"prompt_token_ids": [1, 2, 3]},
+            max_context_tokens=5,
+        )
+
+        bounded, _ = await fit_request_to_context(
+            engine,
+            InferenceRequest(messages=({"role": "user", "content": "x"},), max_tokens=9),
+        )
+
+        self.assertEqual(bounded.max_tokens, 2)
+
     async def test_normalizes_cumulative_outputs(self) -> None:
         native = FakeVLLM(
             [

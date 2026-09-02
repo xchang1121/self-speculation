@@ -1,11 +1,20 @@
 """Inference-engine protocols and built-in adapters."""
 
-from .base import EngineCapabilityError, InferenceEngine, validate_request
+from .base import (
+    EngineCapabilityError,
+    EngineContextLimitError,
+    InferenceEngine,
+    PromptCountingEngine,
+    RequestContextBudget,
+    fit_request_to_context,
+    validate_request,
+)
 from .callable import CallableEngine, ChunkMapper, StreamFactory, default_chunk_mapper
 from .openai_compatible import (
     LlamaCppEngine,
     OpenAICompatibleEngine,
     OpenAIStreamError,
+    PromptTokenCounter,
     SGLangEngine,
     TGIEngine,
     VLLMEngine,
@@ -24,6 +33,7 @@ from .transformers import (
 )
 from .vllm_native import (
     NativePromptRenderer,
+    NativePromptTokenCounter,
     OutputMode,
     SamplingParamsFactory,
     VLLMNativeEngine,
@@ -33,6 +43,7 @@ __all__ = [
     "CallableEngine",
     "ChunkMapper",
     "EngineCapabilityError",
+    "EngineContextLimitError",
     "InferenceEngine",
     "LlamaCppEngine",
     "LlamaCppBoundaryDraftModel",
@@ -40,9 +51,13 @@ __all__ = [
     "LlamaCppPromptRenderer",
     "LlamaCppPythonEngine",
     "NativePromptRenderer",
+    "NativePromptTokenCounter",
     "OpenAICompatibleEngine",
     "OpenAIStreamError",
     "OutputMode",
+    "PromptCountingEngine",
+    "PromptTokenCounter",
+    "RequestContextBudget",
     "SamplingParamsFactory",
     "SGLangEngine",
     "StreamFactory",
@@ -54,5 +69,6 @@ __all__ = [
     "VLLMEngine",
     "VLLMNativeEngine",
     "default_chunk_mapper",
+    "fit_request_to_context",
     "validate_request",
 ]

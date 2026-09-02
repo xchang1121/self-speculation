@@ -199,6 +199,7 @@ class LlamaCppPythonEngine:
         generation_kwargs: Mapping[str, Any] | None = None,
         prefix_cache: bool | None = False,
         draft_request_predicate: LlamaCppDraftRequestPredicate | None = None,
+        max_context_tokens: int | None = None,
         name: str = "llama-cpp-python",
     ) -> None:
         if llama is None:
@@ -223,12 +224,16 @@ class LlamaCppPythonEngine:
         )
         self.name = name
         self._generation_lock = threading.RLock()
+        if max_context_tokens is None:
+            n_ctx = getattr(llama, "n_ctx", None)
+            max_context_tokens = int(n_ctx()) if callable(n_ctx) else None
         self.capabilities = EngineCapabilities(
             prompt=True,
             chat=True,
             structured_tool_deltas=True,
             prefix_cache=prefix_cache,
             draft_feedback=draft_model is not None,
+            max_context_tokens=max_context_tokens,
         )
 
     async def render_prompt(self, request: InferenceRequest) -> str:

@@ -13,6 +13,7 @@ from self_speculation import (
     SGLangEngine,
     TGIEngine,
     VLLMEngine,
+    fit_request_to_context,
 )
 
 
@@ -23,6 +24,23 @@ def sse(*payloads: object) -> bytes:
 
 
 class OpenAICompatibleEngineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_exposes_injected_exact_prompt_accounting(self) -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+        engine = OpenAICompatibleEngine(
+            "http://engine/v1",
+            client=client,
+            max_context_tokens=10,
+            prompt_token_counter=lambda request: len(request.prompt or ""),
+        )
+
+        bounded, budget = await fit_request_to_context(
+            engine, InferenceRequest(prompt="12345678", max_tokens=9)
+        )
+
+        self.assertEqual(bounded.max_tokens, 2)
+        self.assertEqual(budget.prompt_tokens if budget else None, 8)
+        await client.aclose()
+
     async def test_streams_raw_completion_with_logprobs_and_tokens(self) -> None:
         requests: list[httpx.Request] = []
 

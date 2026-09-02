@@ -11,6 +11,7 @@ from ..models import EngineCapabilities, InferenceRequest, StreamChunk, TokenLog
 
 SamplingParamsFactory = Callable[[InferenceRequest], Any | Awaitable[Any]]
 NativePromptRenderer = Callable[[InferenceRequest], Any | Awaitable[Any]]
+NativePromptTokenCounter = Callable[[InferenceRequest], int | Awaitable[int]]
 OutputMode = Literal["delta", "cumulative", "auto"]
 
 
@@ -56,6 +57,8 @@ class VLLMNativeEngine:
         output_mode: OutputMode = "auto",
         choice_index: int = 0,
         prefix_cache: bool | None = None,
+        max_context_tokens: int | None = None,
+        prompt_token_counter: NativePromptTokenCounter | None = None,
         name: str = "vllm-native",
     ) -> None:
         if output_mode not in ("delta", "cumulative", "auto"):
@@ -67,13 +70,27 @@ class VLLMNativeEngine:
         self.prompt_renderer = prompt_renderer
         self.output_mode = output_mode
         self.choice_index = choice_index
+        self.prompt_token_counter = prompt_token_counter
         self.name = name
+        if max_context_tokens is None:
+            max_context_tokens = getattr(getattr(engine, "model_config", None), "max_model_len", None)
         self.capabilities = EngineCapabilities(
             prompt=True,
             chat=prompt_renderer is not None,
             token_ids=True,
             logprobs=True,
             prefix_cache=prefix_cache,
+            max_context_tokens=max_context_tokens,
+        )
+
+    async def prompt_token_count(self, request: InferenceRequest) -> int:
+        if self.prompt_token_counter is not None:
+            return int(await _resolve(self.prompt_token_counter(request)))
+        prompt = await self._prompt(request)
+        if isinstance(prompt, Mapping) and "prompt_token_ids" in prompt:
+            return len(prompt["prompt_token_ids"])
+        raise ValueError(
+            "vLLM prompt counting requires prompt_token_counter or rendered prompt_token_ids"
         )
 
     def _default_sampling_params(self, request: InferenceRequest) -> tuple[Any, OutputMode]:

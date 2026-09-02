@@ -297,6 +297,7 @@ class TransformersEngine:
         draft_store: BoundaryDraftStore | None = None,
         max_draft_tokens: int = 28,
         draft_request_predicate: TransformersDraftRequestPredicate | None = None,
+        max_context_tokens: int | None = None,
         name: str = "transformers",
     ) -> None:
         if model is None:
@@ -318,12 +319,24 @@ class TransformersEngine:
             lambda request: not request.request_id.endswith(":fork")
         )
         self.name = name
+        model_config = getattr(model, "config", None)
+        if max_context_tokens is None and model_config is not None:
+            max_context_tokens = next(
+                (
+                    int(value)
+                    for key in ("max_position_embeddings", "n_positions", "n_ctx")
+                    if (value := getattr(model_config, key, None)) is not None
+                    and int(value) > 0
+                ),
+                None,
+            )
         self.capabilities = EngineCapabilities(
             prompt=True,
             chat=True,
             token_ids=True,
             prefix_cache=False,
             draft_feedback=draft_store is not None,
+            max_context_tokens=max_context_tokens,
         )
 
     async def render_prompt(self, request: InferenceRequest) -> str:
