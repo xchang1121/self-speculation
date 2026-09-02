@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .continuations import ContinuationPlanner
 from .decoding import default_decoder
 from .drafts import (
     DraftBoundary,
@@ -25,7 +26,7 @@ from .drafts import (
     format_tool_call_draft,
 )
 from .engines import InferenceEngine, fit_request_to_context, validate_request
-from .forks import PrefixForkBuilder, PromptRenderer
+from .forks import PrefixForkBuilder, PromptRenderer, render_fork_base
 from .models import InferenceRequest, StreamSnapshot, TokenLogprob, ToolCall
 
 
@@ -252,8 +253,10 @@ class SnapshotForkRunner:
     tokenizer: DraftTokenizer
     prompt_renderer: PromptRenderer | None = None
     default_format: str = "tagged_json"
-    default_boundary: str = "<tool_call>"
     max_draft_tokens: int = 28
+    continuation_planner: ContinuationPlanner = field(
+        default_factory=ContinuationPlanner
+    )
 
     def __post_init__(self) -> None:
         if self.max_draft_tokens <= 0:
@@ -285,8 +288,14 @@ class SnapshotForkRunner:
             ),
             token_count=int(snapshot_payload.get("token_count") or 0),
         )
-        forced_prefix = str(
-            options.get("forced_prefix") or self.default_boundary
+        format_name = str(
+            options.get("draft_format") or self.default_format
+        ).strip()
+        if not format_name:
+            raise ValueError("draft_format must not be empty")
+        forced_prefix_value = options.get("forced_prefix")
+        forced_prefix = (
+            str(forced_prefix_value) if forced_prefix_value is not None else None
         )
         max_tokens = _positive_integer(
             options.get("max_tokens"), field="max_tokens", fallback=128
@@ -299,9 +308,19 @@ class SnapshotForkRunner:
             raise ValueError(
                 f"engine {self.engine.name!r} does not expose token logprobs"
             )
-        builder = PrefixForkBuilder(
-            forced_prefix=forced_prefix,
+        base_prompt = await render_fork_base(
+            actor_request,
             prompt_renderer=self.prompt_renderer,
+        )
+        continuation = self.continuation_planner.plan(
+            base_prompt,
+            snapshot,
+            tool_format=format_name,
+            forced_prefix=forced_prefix,
+        )
+        builder = PrefixForkBuilder(
+            forced_prefix=continuation.forced_suffix,
+            base_prompt=base_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
             extra=(
@@ -310,14 +329,20 @@ class SnapshotForkRunner:
                 else {}
             ),
         )
-        fork_request = await builder.build(actor_request, snapshot)
+        fork_request = await builder.build(
+            actor_request,
+            replace(snapshot, generated_text=continuation.observed_text),
+        )
         fork_request, context_budget = await fit_request_to_context(
             self.engine, fork_request
         )
         validate_request(self.engine, fork_request)
         fork_built_at = time.perf_counter()
         decoder_name = str(options.get("decoder") or "auto")
-        decoder = default_decoder(decoder_name, initial_text=forced_prefix)
+        decoder = default_decoder(
+            decoder_name,
+            initial_text=continuation.decoder_prefix,
+        )
         iterator = self.engine.stream(fork_request).__aiter__()
         decoded: list[ToolCall] = []
         first_chunk_ms: float | None = None
@@ -340,12 +365,14 @@ class SnapshotForkRunner:
         if not decoded:
             raise ValueError("self-speculation fork produced no complete tool call")
 
-        format_name = str(
-            options.get("draft_format") or self.default_format
-        ).strip()
         boundary_text = str(
-            options.get("draft_boundary") or self.default_boundary
+            options.get("draft_boundary") or continuation.boundary
         )
+        if boundary_text != continuation.boundary:
+            raise ValueError(
+                "draft_boundary must match the selected tool-call format: "
+                f"expected {continuation.boundary!r}"
+            )
         calls = tuple(
             ToolCall(
                 name=call.name,
@@ -411,6 +438,14 @@ class SnapshotForkRunner:
                     "output_chunks": output_chunks,
                     "decoded_tokens": decoded_tokens,
                     "logprobs": logprob_observation,
+                    "continuation": {
+                        "tool_format": continuation.tool_format,
+                        "tool_prefix": continuation.decoder_prefix,
+                        "reasoning_format": continuation.reasoning_format,
+                        "reconstructed_transition": (
+                            continuation.reconstructed_transition
+                        ),
+                    },
                     **(
                         {
                             "context_budget": {

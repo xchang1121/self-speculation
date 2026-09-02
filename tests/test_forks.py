@@ -4,6 +4,8 @@ import unittest
 
 from self_speculation import (
     CallableForkBuilder,
+    ContinuationFormatError,
+    ContinuationPlanner,
     ForkBuildError,
     InferenceRequest,
     PrefixForkBuilder,
@@ -81,6 +83,60 @@ class CallableForkBuilderTest(unittest.IsolatedAsyncioTestCase):
         builder = CallableForkBuilder(lambda request, snapshot: "not a request")
         with self.assertRaises(ForkBuildError):
             await builder.build(InferenceRequest(prompt="x"), StreamSnapshot())
+
+
+class ContinuationPlannerTest(unittest.TestCase):
+    def test_closes_the_envelope_that_is_actually_open(self) -> None:
+        plan = ContinuationPlanner().plan(
+            "<|assistant|><analysis>\n",
+            StreamSnapshot(generated_text="inspect", content="inspect"),
+            tool_format="tagged_json",
+        )
+
+        self.assertEqual(plan.observed_text, "inspect")
+        self.assertEqual(
+            plan.forced_suffix,
+            "\n</analysis>\n\n<tool_call>",
+        )
+        self.assertEqual(plan.reasoning_format, "analysis_xml")
+
+    def test_restores_a_hidden_qwen_transition_before_visible_content(self) -> None:
+        plan = ContinuationPlanner().plan(
+            "<|im_start|>assistant\n<think>\n",
+            StreamSnapshot(
+                generated_text="reasonanswer",
+                reasoning="reason",
+                content="answer",
+            ),
+            tool_format="qwen_xml",
+        )
+
+        self.assertEqual(
+            plan.observed_text,
+            "reason\n</think>\n\nanswer",
+        )
+        self.assertEqual(plan.forced_suffix, "<tool_call>")
+        self.assertTrue(plan.reconstructed_transition)
+
+    def test_rejects_opaque_reasoning_without_a_text_envelope(self) -> None:
+        with self.assertRaisesRegex(
+            ContinuationFormatError,
+            "engine-native fork",
+        ):
+            ContinuationPlanner().plan(
+                "structured-provider-prompt",
+                StreamSnapshot(generated_text="summary", reasoning="summary"),
+                tool_format="tagged_json",
+            )
+
+    def test_rejects_a_tool_prefix_from_another_format(self) -> None:
+        with self.assertRaisesRegex(ContinuationFormatError, "deepseek_dsml"):
+            ContinuationPlanner().plan(
+                "prompt",
+                StreamSnapshot(generated_text="text", content="text"),
+                tool_format="deepseek_dsml",
+                forced_prefix="<tool_call>",
+            )
 
 
 if __name__ == "__main__":

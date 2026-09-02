@@ -41,6 +41,30 @@ async def _resolve(value: Any) -> Any:
     return value
 
 
+async def render_fork_base(
+    main_request: InferenceRequest,
+    *,
+    base_prompt: str | None = None,
+    prompt_renderer: PromptRenderer | None = None,
+) -> str:
+    """Render the exact shared Actor prefix before generated output."""
+
+    if base_prompt is not None and prompt_renderer is not None:
+        raise ValueError("base_prompt and prompt_renderer are mutually exclusive")
+    if base_prompt is not None:
+        return base_prompt
+    if prompt_renderer is not None:
+        rendered = await _resolve(prompt_renderer(main_request))
+        if not isinstance(rendered, str):
+            raise ForkBuildError("prompt_renderer must return a string")
+        return rendered
+    if main_request.prompt is not None:
+        return main_request.prompt
+    raise ForkBuildError(
+        "chat requests need base_prompt or prompt_renderer for a prefix fork"
+    )
+
+
 @dataclass(slots=True)
 class PrefixForkBuilder:
     """Build a raw-completion fork by appending observed output and a prefix.
@@ -72,18 +96,12 @@ class PrefixForkBuilder:
         if self.base_prompt is not None and self.prompt_renderer is not None:
             raise ValueError("base_prompt and prompt_renderer are mutually exclusive")
 
-    async def _base(self, main_request: InferenceRequest) -> str:
-        if self.base_prompt is not None:
-            return self.base_prompt
-        if self.prompt_renderer is not None:
-            rendered = await _resolve(self.prompt_renderer(main_request))
-            if not isinstance(rendered, str):
-                raise ForkBuildError("prompt_renderer must return a string")
-            return rendered
-        if main_request.prompt is not None:
-            return main_request.prompt
-        raise ForkBuildError(
-            "chat requests need base_prompt or prompt_renderer for a prefix fork"
+    async def render_base(self, main_request: InferenceRequest) -> str:
+        """Render only the shared Actor prefix, before observed output."""
+        return await render_fork_base(
+            main_request,
+            base_prompt=self.base_prompt,
+            prompt_renderer=self.prompt_renderer,
         )
 
     async def build(
@@ -91,7 +109,7 @@ class PrefixForkBuilder:
         main_request: InferenceRequest,
         snapshot: StreamSnapshot,
     ) -> InferenceRequest:
-        base = await self._base(main_request)
+        base = await self.render_base(main_request)
         observed = snapshot.generated_text if self.include_observed else ""
         return InferenceRequest(
             prompt=base + observed + self.forced_prefix,

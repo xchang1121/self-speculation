@@ -374,6 +374,30 @@ class SelfSpeculationControlPlaneTest(unittest.IsolatedAsyncioTestCase):
             [("read", {"path": "a.txt"}), ("read", {"path": "b.txt"})],
         )
 
+    async def test_closes_the_rendered_reasoning_envelope_before_the_probe(self) -> None:
+        plane, _, engine = self.fixture()
+        engine.capabilities = EngineCapabilities(
+            prompt=True,
+            logprobs=True,
+            prefix_cache=True,
+            max_context_tokens=64,
+        )
+        payload = fork_payload()
+        payload["context"]["provider_payload"]["prompt"] = "PROMPT<think>\n"
+        payload["snapshot"] = {
+            "generated_text": "reason",
+            "reasoning": "reason",
+            "chunk_count": 1,
+            "output_chunk_count": 1,
+        }
+
+        await plane.fork(payload)
+
+        self.assertEqual(
+            engine.requests[0].prompt,
+            "PROMPT<think>\nreason\n</think>\n\n<tool_call>",
+        )
+
     async def test_deduplicates_self_agreement_by_complete_draft_content(self) -> None:
         feedback = RecordingBundleFeedback()
         engine = AgreeingForkEngine()

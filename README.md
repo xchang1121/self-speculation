@@ -228,6 +228,13 @@ the first call. Bundle observations preserve every call index/ID/format plus
 candidate IDs, sources, proposal provenance, scores, timing, and logprobs for
 the action runtime that consumes the receipt.
 
+Before a textual fork is built, `ContinuationPlanner` matches the open CoT
+envelope in the rendered Actor prompt and uses that envelope's own closer. It
+also restores a hidden reasoning-to-content transition when an API exposes the
+two fields separately. Signed or otherwise structured reasoning without a
+matching text envelope is rejected; that path requires an engine-native fork
+which preserves the provider state instead of fabricating text.
+
 Its portable FastAPI routes are:
 
 | Route | Purpose |

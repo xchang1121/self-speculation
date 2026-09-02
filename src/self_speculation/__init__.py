@@ -1,5 +1,12 @@
 """Engine-agnostic streaming self-speculation for tool calls."""
 
+from .continuations import (
+    ContinuationFormatError,
+    ContinuationPlanner,
+    DEFAULT_REASONING_ENVELOPES,
+    ForkContinuation,
+    ReasoningEnvelope,
+)
 from .control_plane import (
     CandidateBundleBuilder,
     ControlRequestClosedError,
@@ -138,6 +145,8 @@ __all__ = [
     "CallableEngine",
     "CandidateBundleBuilder",
     "ControlRequestClosedError",
+    "ContinuationFormatError",
+    "ContinuationPlanner",
     "CallableDraftFeedback",
     "ChunkMapper",
     "DecoderFactory",
@@ -165,6 +174,7 @@ __all__ = [
     "ForkChunkEvent",
     "ForkCompletedEvent",
     "ForkController",
+    "ForkContinuation",
     "ForkEvent",
     "ForkFailedEvent",
     "ForkRequestBuilder",
@@ -190,6 +200,7 @@ __all__ = [
     "PromptCountingEngine",
     "PromptTokenCounter",
     "RequestContextBudget",
+    "ReasoningEnvelope",
     "ParserFactory",
     "ParserRegistrationError",
     "ParserRegistry",
@@ -229,6 +240,7 @@ __all__ = [
     "VLLMIntegrationError",
     "VLLMRequestNotActiveError",
     "__version__",
+    "DEFAULT_REASONING_ENVELOPES",
     "default_decoder",
     "default_draft_boundary",
     "default_chunk_mapper",

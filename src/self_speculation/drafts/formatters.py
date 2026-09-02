@@ -3,10 +3,46 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from ..models import ToolCall
 from .base import DraftBoundary
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallSyntax:
+    """Text framing shared by probe continuation and D3 serialization."""
+
+    boundary: str
+    close: str | None = None
+
+
+_TOOL_CALL_SYNTAXES = {
+    "tagged_json": ToolCallSyntax("<tool_call>", "</tool_call>"),
+    "qwen_xml": ToolCallSyntax("<tool_call>", "</tool_call>"),
+    "deepseek_dsml": ToolCallSyntax(
+        "<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>"
+    ),
+    "deepseek_v3": ToolCallSyntax(
+        "<｜tool▁calls▁begin｜>", "<｜tool▁calls▁end｜>"
+    ),
+    "mistral_json": ToolCallSyntax("[TOOL_CALLS]"),
+    "llama_json": ToolCallSyntax("<|python_tag|>"),
+    "pythonic": ToolCallSyntax("<|python_tag|>"),
+}
+
+
+def tool_call_syntax(format_name: str) -> ToolCallSyntax:
+    """Return the canonical framing for a registered output format."""
+
+    normalized = format_name.strip().lower()
+    if not normalized:
+        raise ValueError("format_name must not be empty")
+    return _TOOL_CALL_SYNTAXES.get(
+        normalized,
+        _TOOL_CALL_SYNTAXES["tagged_json"],
+    )
 
 
 def _json(value: Any) -> str:
@@ -85,11 +121,4 @@ def format_tool_call_draft(tool_calls: tuple[ToolCall, ...]) -> str:
 def default_draft_boundary(tool_calls: tuple[ToolCall, ...]) -> DraftBoundary:
     if not tool_calls:
         raise ValueError("tool_calls must not be empty")
-    format_name = tool_calls[0].format
-    markers = {
-        "qwen_xml": "<tool_call>",
-        "deepseek_dsml": "<｜DSML｜tool_calls>",
-        "deepseek_v3": "<｜tool▁calls▁begin｜>",
-        "pythonic": "<|python_tag|>",
-    }
-    return DraftBoundary(text=markers.get(format_name, "<tool_call>"))
+    return DraftBoundary(text=tool_call_syntax(tool_calls[0].format).boundary)

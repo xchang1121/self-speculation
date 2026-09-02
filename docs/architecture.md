@@ -28,7 +28,7 @@ sequenceDiagram
     par Main continues
         C->>M: request next delta
     and Prefix fork starts (D1)
-        C->>F: stream(prompt + observed output + forced boundary)
+        C->>F: stream(prompt + observed output + matched CoT close + tool boundary)
         F-->>P: text or structured deltas
         P-->>C: completed ToolCall
         C->>D: register boundary-relative draft
@@ -45,6 +45,12 @@ requests are external candidate producers and are never self-forked. When D3 is
 enabled, the target engine verifies every proposed token using its normal
 speculative-decoding path. Rejected tokens therefore fall back to target-model
 decoding instead of changing the model's output distribution.
+
+Text continuations are format checked before dispatch. Tool-call boundaries
+come from the same syntax table used by D3 formatting, while CoT exits come
+from the envelope that is actually open in the rendered prefix. Opaque signed
+reasoning blocks (for example provider-managed thought state) cannot be safely
+converted to a suffix and therefore require a native fork implementation.
 
 ## Components
 
