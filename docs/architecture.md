@@ -2,7 +2,7 @@
 
 `self-speculation` extracts two reusable mechanisms from SPORK:
 
-1. **D1-style streaming fork:** after the first useful main-stream delta, start
+1. **D1-style streaming fork:** after the first useful Actor-stream delta, start
    one continuation that shares the already-populated prefix and force it onto a
    tool-call branch.
 2. **D3-style action drafting:** decode the fork into a complete action, encode
@@ -40,7 +40,8 @@ sequenceDiagram
     C->>D: clear(main request ID)
 ```
 
-The fork predicts an action; it never replaces the main stream. When D3 is
+The fork predicts an action; it never replaces the Actor stream. Drafter-model
+requests are external candidate producers and are never self-forked. When D3 is
 enabled, the target engine verifies every proposed token using its normal
 speculative-decoding path. Rejected tokens therefore fall back to target-model
 decoding instead of changing the model's output distribution.

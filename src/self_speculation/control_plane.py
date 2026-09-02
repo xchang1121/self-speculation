@@ -236,7 +236,7 @@ class SnapshotForkRunner:
         if not isinstance(options, Mapping):
             raise ValueError("options must be an object")
 
-        main_request = _inference_request(request_id, payload, context)
+        actor_request = _actor_request(request_id, payload, context)
         snapshot = StreamSnapshot(
             generated_text=str(snapshot_payload.get("generated_text") or ""),
             content=str(snapshot_payload.get("content") or ""),
@@ -272,7 +272,7 @@ class SnapshotForkRunner:
                 else {}
             ),
         )
-        fork_request = await builder.build(main_request, snapshot)
+        fork_request = await builder.build(actor_request, snapshot)
         validate_request(self.engine, fork_request)
         fork_built_at = time.perf_counter()
         decoder_name = str(options.get("decoder") or "auto")
@@ -563,7 +563,7 @@ def install_self_speculation_routes(
     return True
 
 
-def _inference_request(
+def _actor_request(
     request_id: str,
     payload: Mapping[str, Any],
     context: Mapping[str, Any],

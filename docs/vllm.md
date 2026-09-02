@@ -178,9 +178,10 @@ shutdown.
 If only external concrete actions are needed, point the agent directly at the
 vLLM server and disable its sidecar fork. A `provider` transport is a separate
 contract: the serving provider must explicitly interpret the injected
-`self_speculation` request object and start its own Actor or Drafter fork.
+`self_speculation` request object and fork only the authoritative Actor stream.
 Stock OpenAI-compatible request parsing and this endpoint plugin do not turn
-unknown request fields into a fork automatically.
+unknown request fields into a fork automatically. Drafter requests can still
+contribute external candidates, but are never self-forked.
 
 ## Connect a controller over HTTP
 

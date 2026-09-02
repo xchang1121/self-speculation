@@ -12,6 +12,9 @@ Python library:
 The authoritative main stream always continues independently. Forking, parsing,
 and draft feedback are replaceable components, so the same controller can be
 used with different serving engines and model-specific tool-call formats.
+Self-speculation always forks the authoritative Actor request. External
+Drafter or learned candidates may share its target-verification bundle, but
+their inference requests are never self-forked.
 
 See [the architecture guide](docs/architecture.md) for the complete D1/D3 data
 flow and failure semantics, and the [engine compatibility guide](docs/engines.md)
