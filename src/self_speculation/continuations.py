@@ -61,6 +61,34 @@ def _unclosed_envelope(
     return max(matches, default=(-1, None), key=lambda item: item[0])[1]
 
 
+def _active_envelope(
+    base_prompt: str,
+    generated_text: str,
+    envelopes: tuple[ReasoningEnvelope, ...],
+) -> ReasoningEnvelope | None:
+    """Find an open generation envelope without inspecting earlier user text."""
+
+    generated = _unclosed_envelope(generated_text, envelopes)
+    if generated is not None:
+        return generated
+    trailing = [
+        (position, envelope)
+        for envelope in envelopes
+        if (position := base_prompt.rfind(envelope.open))
+        > base_prompt.rfind(envelope.close)
+        and not base_prompt[position + len(envelope.open) :].strip()
+    ]
+    for position, envelope in sorted(
+        trailing, key=lambda item: item[0], reverse=True
+    ):
+        if _unclosed_envelope(
+            base_prompt[position:] + generated_text,
+            (envelope,),
+        ) is not None:
+            return envelope
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ContinuationPlanner:
     """Compose a probe without crossing textual and structured CoT protocols.
@@ -99,7 +127,11 @@ class ContinuationPlanner:
             snapshot.reasoning + snapshot.content,
         )
         if snapshot.reasoning and normalized_split:
-            envelope = _unclosed_envelope(base_prompt, self.envelopes)
+            envelope = _active_envelope(
+                base_prompt,
+                snapshot.reasoning,
+                self.envelopes,
+            )
             if envelope is None:
                 raise ContinuationFormatError(
                     "reasoning was exposed as a separate field without a matching "
@@ -129,7 +161,7 @@ class ContinuationPlanner:
             )
 
         observed = snapshot.generated_text
-        envelope = _unclosed_envelope(base_prompt + observed, self.envelopes)
+        envelope = _active_envelope(base_prompt, observed, self.envelopes)
         exit_text = envelope.exit(observed) if envelope is not None else ""
         return ForkContinuation(
             observed_text=observed,

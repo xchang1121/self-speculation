@@ -235,6 +235,10 @@ two fields separately. Signed or otherwise structured reasoning without a
 matching text envelope is rejected; that path requires an engine-native fork
 which preserves the provider state instead of fabricating text.
 
+Prompt-side envelope detection is anchored to the active assistant-generation
+tail, so an unmatched tag quoted earlier in user or history text cannot select
+a closer. A closer already emitted in raw Actor output is never duplicated.
+
 The selected tool format also supplies a name-aligned probe prefix. JSON/XML
 schema text is forced through the character immediately before the tool name,
 so D2 confidence is measured from generated tool-name tokens rather than from

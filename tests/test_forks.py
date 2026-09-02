@@ -154,6 +154,26 @@ class ContinuationPlannerTest(unittest.TestCase):
                 tool_format="tagged_json",
             )
 
+    def test_does_not_treat_a_user_tag_as_the_actors_open_envelope(self) -> None:
+        with self.assertRaisesRegex(ContinuationFormatError, "engine-native fork"):
+            ContinuationPlanner().plan(
+                "<|user|>explain <think> literally<|assistant|>\n",
+                StreamSnapshot(generated_text="reason", reasoning="reason"),
+                tool_format="tagged_json",
+            )
+
+    def test_does_not_close_an_envelope_already_closed_by_raw_output(self) -> None:
+        plan = ContinuationPlanner().plan(
+            "<|assistant|><think>\n",
+            StreamSnapshot(
+                generated_text="reason\n</think>\nanswer",
+                content="reason\n</think>\nanswer",
+            ),
+            tool_format="tagged_json",
+        )
+
+        self.assertNotIn("</think>", plan.forced_suffix)
+
     def test_rejects_a_tool_prefix_from_another_format(self) -> None:
         with self.assertRaisesRegex(ContinuationFormatError, "deepseek_dsml"):
             ContinuationPlanner().plan(
